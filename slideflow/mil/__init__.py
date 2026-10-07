@@ -5,7 +5,6 @@ from .train import (
     build_fastai_learner,
     build_multimodal_learner
 )
-from .train._lora import train_lora, predict_lora
 from .eval import (
     eval_mil,
     predict_mil,

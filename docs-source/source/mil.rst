@@ -55,62 +55,12 @@ nnMIL
 
 With ``uq=True`` at inference, the model reports the spread of its predictions across the feature subsets as an uncertainty estimate.
 
-A focused example in ``examples/nnmil_subtype/README.md`` shows how to train a lobular-versus-ductal head and score it from the same encoder features as an RS head.
+See ``examples/mil_comparison/README.md`` for benchmarking nnMIL alongside other MIL architectures on the same feature bags. Checkpoints can be loaded with ``NNMIL.from_checkpoint(path)``.
 
-Training nnMIL with LoRA
-***********************
+Encoder adaptation
+******************
 
-``sf.mil.train_lora`` trains an nnMIL head together with query/value adapters in the last blocks of a H-Optimus-0 or Mettle encoder. It reads raw tile bags, since saved feature bags cannot update the encoder. Each batch must contain uint8 tiles shaped ``(patients, tiles, height, width, 3)`` and one binary label per patient. The extractor supplies the tile transform.
-
-.. code-block:: python
-
-    import slideflow as sf
-    from slideflow.mil.models import NNMIL
-
-    extractor = sf.build_feature_extractor('hoptimus0', weights='base/pytorch_model.bin')
-    head = NNMIL(1536, 1)
-    history = sf.mil.train_lora(
-        extractor, head, train_batches,
-        val_batches=validation_batches,
-        first_block=32, rank=8, alpha=16,
-        outdir='runs/fold0'
-    )
-
-The output contains ``adapters.pt`` in the format accepted by the extractor's ``lora`` argument, ``head.pt``, and ``history.json``. Use a fresh extractor and ``adapt=False`` for a matched frozen-encoder control. Patient-grouped folds and tile sampling are supplied by the caller; this raw-tile API is separate from :func:`slideflow.Project.train_mil`, which trains on saved feature bags. Use a re-iterable loader for multiple epochs. ``seed`` covers adapter initialization and training randomness; seed the caller's head construction separately.
-
-For joint RS classification and regression, use a three-output head and provide measured RS as the third element of each batch:
-
-.. code-block:: python
-
-    head = NNMIL(1536, 3)
-    history = sf.mil.train_lora(
-        extractor, head, train_batches,
-        objective='joint', positive_weight=training_negative_count / training_positive_count,
-        first_block=32, rank=8, alpha=16, seed=42,
-        outdir='runs/fold0_joint'
-    )
-
-The joint loss combines class-weighted cross entropy for RS >=26 with MSE on ``(RS-18)/10``. The backbone weights stay frozen while adapters and the head update together. A final head may subsequently be fitted on saved features from the frozen adapted encoder.
-
-Load saved adapters into a fresh extractor and load the corresponding head for prediction:
-
-.. code-block:: python
-
-    import torch
-
-    extractor = sf.build_feature_extractor(
-        'hoptimus0', weights='base/pytorch_model.bin',
-        lora='runs/fold0_joint/adapters.pt',
-        lora_first_block=32, lora_rank=8, lora_alpha=16
-    )
-    head = NNMIL(1536, 3)
-    head.load_state_dict(torch.load('runs/fold0_joint/head.pt', map_location='cpu', weights_only=True))
-    head.to(extractor.device).eval()
-    predictions = sf.mil.predict_lora(extractor, head, validation_batches, objective='joint')
-
-``predict_lora`` returns the class-logit difference and the regression output transformed back to RS units. These outputs are from the joint training head and differ from a separately refitted soft-label head's standardized image score.
-
-Mettle uses the same adapter arguments and requires a locally authorized base checkpoint; the extractor does not download model weights. The adapter implementation supports timm ViTs with packed query/key/value projections. Validation covers H-Optimus-0 and Mettle; other encoder architectures require separate compatibility checks.
+LoRA training is independent of nnMIL. The :ref:`lora_training` API accepts a caller-supplied prediction model and loss, including attention MIL, nnMIL, Bistro, and custom PyTorch heads. Saved-feature MIL training remains available through ``Project.train_mil``; updating encoder adapters requires raw tiles.
 
 
 Classification & Regression

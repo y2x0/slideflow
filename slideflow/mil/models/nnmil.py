@@ -148,20 +148,18 @@ class NNMIL(nn.Module):
         return scores
 
     @classmethod
-    def from_rsimage(cls, path: str, n_feats: int = 1536) -> "NNMIL":
-        """Load a trained head saved by rs-image (``heads/fold{k}.pt``).
-
-        rs-image names the layers ``V``, ``U``, ``w``, ``cls`` and the fixed
-        inference subsets ``chunks``; the architecture is the same as this
-        class. Returns the model in eval mode. Its output is the raw logit;
-        rs-image z-scores it with the fold mean/SD in ``model.json``.
-
-        """
+    def from_checkpoint(cls, path: str) -> "NNMIL":
+        """Load current or legacy nnMIL checkpoint names and return an eval model."""
         state = torch.load(path, map_location='cpu', weights_only=True)
-        n_out, hidden_dim = state['cls.weight'].shape[0], state['V.weight'].shape[0]
+        rename = {'V': 'attention_V', 'U': 'attention_U', 'w': 'attention_w',
+                  'cls': 'head', 'chunks': 'eval_subsets'}
+        state = {rename.get(key.split('.', 1)[0], key.split('.', 1)[0])
+                 + key[len(key.split('.', 1)[0]):]: value for key, value in state.items()}
+        n_out, n_feats = state['head.weight'].shape
+        hidden_dim = state['attention_V.weight'].shape[0]
         model = cls(n_feats, n_out, hidden_dim=hidden_dim)
-        rename = {'V': 'attention_V', 'U': 'attention_U', 'w': 'attention_w', 'cls': 'head', 'chunks': 'eval_subsets'}
-        model.load_state_dict({rename[k.split('.', 1)[0]] + k[len(k.split('.', 1)[0]):]: v for k, v in state.items()}, strict=True)
+        model.eval_subsets = state['eval_subsets'].clone()
+        model.load_state_dict(state, strict=True)
         return model.eval()
 
     def calculate_attention(self, bags, lens=None, *, apply_softmax=None):

@@ -18,7 +18,7 @@ training runs.
 ### Added
 
 - Query/value LoRA loading for H-Optimus-0 and the local-checkpoint Mettle extractor, with adapter validation before changing the encoder.
-- Raw-tile ``sf.mil.train_lora`` and ``sf.mil.predict_lora`` for joint adapter/head training or a frozen-encoder control, including binary and joint RS objectives.
+- Independent raw-tile ``slideflow.model.lora.train_lora`` and ``predict_lora`` APIs with caller-supplied prediction models, losses, and optional forward callbacks.
 
 - **nnMIL model** — new `nnmil` MIL architecture (`mil_config('nnmil')`):
   gated attention over random feature-dimension subsets during training,
