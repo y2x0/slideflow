@@ -1,17 +1,12 @@
 """Train encoder adapters with a user-supplied prediction model and loss."""
 
-import json
-import time
-from pathlib import Path
-
 import torch
-from torch import nn
 from torch.utils.checkpoint import checkpoint
 
 from .extractors._lora import LoRAQKV, adapter_state_dict, apply_lora, init_lora
 
 __all__ = ['LoRAQKV', 'init_lora', 'apply_lora', 'adapter_state_dict',
-           'encode_tiles', 'train_lora', 'predict_lora']
+           'encode_tiles', 'build_lora_learner', 'train_lora', 'predict_lora']
 
 
 def encode_tiles(model, images, *, checkpoint_blocks=False):
@@ -102,94 +97,33 @@ def predict_lora(extractor, head, batches, *, forward_fn=None, device=None):
     return {'outputs': outputs, 'targets': targets}
 
 
-def train_lora(extractor, head, train_batches, *, loss_fn, forward_fn=None,
-               val_batches=None, epochs=8, first_block=None, rank=8, alpha=16,
-               dropout=0.05, lr_adapter=5e-5, lr_head=2e-4, weight_decay=1e-5,
-               adapt=True, device=None, seed=None, outdir=None):
-    """Fit ViT adapters and any PyTorch bag model with the supplied scalar loss."""
-    if epochs < 1 or not callable(loss_fn):
-        raise ValueError('positive epochs and a callable loss_fn are required')
-    if epochs > 1 and (iter(train_batches) is train_batches or
-                       (val_batches is not None and iter(val_batches) is val_batches)):
-        raise ValueError('multiple epochs require re-iterable training and validation loaders')
-    root = Path(outdir) if outdir is not None else None
-    if root is not None and root.exists():
-        raise FileExistsError(f'output directory already exists: {root}')
-    model = extractor.model
-    device = torch.device(device or next(model.parameters()).device)
-    first_block = max(0, len(model.blocks) - 8) if first_block is None else first_block
-    if seed is not None:
-        torch.manual_seed(seed)
-        if device.type == 'cuda':
-            torch.cuda.manual_seed_all(seed)
-    if adapt:
-        init_lora(model, first_block=first_block, rank=rank, alpha=alpha, dropout=dropout)
-    else:
-        for param in model.parameters():
-            param.requires_grad_(False)
-        model.first_adapted = len(model.blocks)
-    model.to(device)
-    head.to(device)
-    if isinstance(loss_fn, nn.Module):
-        loss_fn.to(device=device, dtype=torch.float32)
-    groups = []
-    head_params = [param for param in head.parameters() if param.requires_grad]
-    if head_params:
-        groups.append({'params': head_params, 'lr': lr_head})
-    if adapt:
-        groups.append({'params': [param for param in model.parameters() if param.requires_grad], 'lr': lr_adapter})
-    if not groups:
-        raise ValueError('the model has no trainable parameters')
-    optimizer = torch.optim.AdamW(groups, weight_decay=weight_decay)
-    schedule = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
-    history = []
-    for epoch in range(1, epochs + 1):
-        started = time.monotonic()
-        model.train()
-        head.train()
-        loss_sum, count = 0.0, 0
-        for batch in train_batches:
-            images, targets, lengths, n, k = _prepare(extractor, batch, device)
-            optimizer.zero_grad(set_to_none=True)
-            with torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == 'cuda'):
-                features = encode_tiles(model, images, checkpoint_blocks=adapt).reshape(n, k, -1).float()
-                output = _forward(head, features, lengths, batch, forward_fn)
-                loss = _loss(loss_fn, output, targets)
-            loss.backward()
-            optimizer.step()
-            loss_sum += float(loss.detach()) * n
-            count += n
-        if not count:
-            raise ValueError('training batches are empty')
-        schedule.step()
-        row = {'epoch': epoch, 'train_loss': loss_sum / count, 'train_bags': count,
-               'epoch_seconds': time.monotonic() - started}
-        if val_batches is not None:
-            model.eval()
-            head.eval()
-            val_sum, val_count = 0.0, 0
-            with torch.inference_mode(), torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == 'cuda'):
-                for batch in val_batches:
-                    images, targets, lengths, n, k = _prepare(extractor, batch, device)
-                    features = encode_tiles(model, images).reshape(n, k, -1).float()
-                    output = _forward(head, features, lengths, batch, forward_fn)
-                    val_sum += float(_loss(loss_fn, output, targets)) * n
-                    val_count += n
-            if not val_count:
-                raise ValueError('validation batches are empty')
-            row.update(val_loss=val_sum / val_count, val_bags=val_count)
-        history.append(row)
-    if root is not None:
-        root.mkdir(parents=True, exist_ok=False)
-        if adapt:
-            torch.save(adapter_state_dict(model, first_block=first_block), root/'adapters.pt')
-        torch.save({key: value.detach().cpu() for key, value in head.state_dict().items()}, root/'head.pt')
-        (root/'history.json').write_text(json.dumps({
-            'encoder': getattr(extractor, 'tag', type(model).__name__),
-            'head': type(head).__name__, 'loss': getattr(loss_fn, '__name__', type(loss_fn).__name__),
-            'adapt': adapt, 'seed': seed, 'epochs': epochs,
-            'first_block': first_block if adapt else None,
-            'rank': rank if adapt else None, 'alpha': alpha if adapt else None,
-            'dropout': dropout if adapt else None, 'history': history
-        }, indent=2) + '\n')
-    return history
+def build_lora_learner(extractor, head, train_batches, val_batches, *, config,
+                       loss_fn=None, forward_fn=None, metrics=None, first_block=None,
+                       rank=8, alpha=16, dropout=0.05, adapt=True, device=None,
+                       seed=None, outdir=None, lr_adapter=5e-5, lr_head=None, categories=None):
+    """Build a FastAI learner for raw-tile adapter training without fitting it."""
+    from ._lora_fastai import build_learner
+    return build_learner(
+        extractor, head, train_batches, val_batches, config=config,
+        loss_fn=loss_fn, forward_fn=forward_fn, metrics=metrics,
+        first_block=first_block, rank=rank, alpha=alpha, dropout=dropout,
+        adapt=adapt, device=device, seed=seed, outdir=outdir,
+        lr_adapter=lr_adapter, lr_head=lr_head, categories=categories)
+
+
+def train_lora(extractor, head, train_batches, *, loss_fn=None, forward_fn=None,
+               val_batches=None, config=None, metrics=None, callbacks=None,
+               epochs=None, first_block=None, rank=8, alpha=16, dropout=0.05,
+               lr_adapter=5e-5, lr_head=None, weight_decay=1e-5, adapt=True,
+               device=None, seed=None, outdir=None, outcomes='outcome',
+               categories=None, prediction_fn=None, return_learner=False):
+    """Fit adapters through Slideflow's FastAI trainer and save its standard results."""
+    from ._lora_fastai import train
+    return train(
+        extractor, head, train_batches, loss_fn=loss_fn, forward_fn=forward_fn,
+        val_batches=val_batches, config=config, metrics=metrics, callbacks=callbacks,
+        epochs=epochs, first_block=first_block, rank=rank, alpha=alpha,
+        dropout=dropout, lr_adapter=lr_adapter, lr_head=lr_head,
+        weight_decay=weight_decay, adapt=adapt, device=device, seed=seed,
+        outdir=outdir, outcomes=outcomes, categories=categories,
+        prediction_fn=prediction_fn, return_learner=return_learner)

@@ -7,6 +7,8 @@ nnMIL is a registered MIL model. LoRA is an independent encoder-training module 
 - [nnMIL model and checkpoint loader](../../slideflow/mil/models/nnmil.py)
 - [MIL registration](../../slideflow/mil/__init__.py) and [configuration](../../slideflow/mil/_params.py)
 - [Generic LoRA training and prediction](../../slideflow/model/lora.py)
+- [FastAI LoRA learner and result exports](../../slideflow/model/_lora_fastai.py)
+- [Shared FastAI learner factory and trainer](../../slideflow/mil/train/_fastai.py)
 - [Adapter insertion and loading](../../slideflow/model/extractors/_lora.py)
 - [H-Optimus extractor](../../slideflow/model/extractors/hoptimus0.py)
 - [Mettle extractor](../../slideflow/model/extractors/mettle.py)
@@ -34,19 +36,21 @@ CLAM models are available through the optional `slideflow-gpl` package. Add `cla
 ## Train adapters with a chosen model
 
 ```python
-import torch
 from slideflow.mil import mil_config
 from slideflow.model.lora import train_lora
 
-head = mil_config('attention_mil').build_model(extractor.num_features, 2)
-train_lora(
+config = mil_config('attention_mil', lr=2e-4, epochs=8)
+head = config.build_model(extractor.num_features, 2)
+learner = train_lora(
     extractor, head, train_batches,
-    loss_fn=torch.nn.CrossEntropyLoss(),
-    val_batches=validation_batches,
-    outdir='runs/adaptation',
+    config=config, val_batches=validation_batches,
+    outcomes='label', categories=['negative', 'positive'],
+    outdir='runs/adaptation', return_learner=True,
 )
 ```
 
-The loader yields uint8 tiles `(bags, tiles, height, width, 3)` and integer class targets. Swap in nnMIL, Bistro, or a custom PyTorch model without changing the trainer. Length-aware models accept padded bags; other signatures use the optional `forward_fn` callback. Regression and multi-task objectives are supplied by the caller. See the LoRA section in `docs-source/source/model.rst` for the batch contract, checkpoint loading, and callback examples.
+This runs through the existing Slideflow FastAI learner and trainer. The run saves the usual CSV history, best checkpoint, MIL configuration, validation predictions and metric plots, plus adapters and head weights from the selected checkpoint. Supply standard FastAI callbacks with `callbacks=[...]`, or use `build_lora_learner` to customize a Learner before fitting.
+
+The loader yields uint8 tiles `(bags, tiles, height, width, 3)` and integer class targets. Swap in nnMIL, Bistro, or a custom PyTorch model without changing the trainer. Sized, re-iterable loaders keep their own sampling and grouping. Dictionary batches may include `slide` and `patient` identifiers for validation exports. Length-aware models accept padded bags; other signatures use `forward_fn`. Regression uses `mil_config(..., loss='mse')`; custom objectives supply `loss_fn`, compatible `metrics`, and a `prediction_fn` callback for the validation table. See the LoRA section in `docs-source/source/model.rst` for the complete contract.
 
 After adapting an encoder, extract features once and benchmark several MIL models on those features. Keep encoder adaptation inside each training fold; validation and held-out labels must not influence adaptation. This example provides a comparison workflow and does not claim a measured performance improvement for any architecture.

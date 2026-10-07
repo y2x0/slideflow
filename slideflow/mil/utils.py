@@ -393,7 +393,9 @@ def _rename_continuous_df_cols(df, outcomes, inplace=False):
 
 def _find_weights_path(path: str, mil_params: Dict) -> str:
     """Determine location of model weights from a given model directory."""
-    if exists(join(path, 'models', 'best_valid.pth')):
+    if mil_params.get('training_input') == 'raw_tiles':
+        weights = join(path, mil_params.get('weights', 'head.pt'))
+    elif exists(join(path, 'models', 'best_valid.pth')):
         weights = join(path, 'models', 'best_valid.pth')
     elif exists(join(path, 'results', 's_0_checkpoint.pt')):
         weights = join(path, 'results', 's_0_checkpoint.pt')

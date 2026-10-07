@@ -18,7 +18,7 @@ training runs.
 ### Added
 
 - Query/value LoRA loading for H-Optimus-0 and the local-checkpoint Mettle extractor, with adapter validation before changing the encoder.
-- Independent raw-tile ``slideflow.model.lora.train_lora`` and ``predict_lora`` APIs with caller-supplied prediction models, losses, and optional forward callbacks.
+- Independent raw-tile ``slideflow.model.lora.train_lora`` and ``build_lora_learner`` APIs using the shared FastAI learner/trainer, metrics, scheduling, CSV history, best-model checkpoints and validation exports. Prediction models, losses and callbacks are caller-configurable; ``predict_lora`` preserves raw model outputs.
 
 - **nnMIL model** — new `nnmil` MIL architecture (`mil_config('nnmil')`):
   gated attention over random feature-dimension subsets during training,

@@ -19,6 +19,10 @@ Designed for both medical researchers and AI enthusiasts, the goal of Slideflow 
 
 
 
+## LoRA and nnMIL in this branch
+
+The [training call and source map](examples/mil_comparison/README.md#train-adapters-with-a-chosen-model) show how to use LoRA with any compatible MIL head. The public API is [`slideflow.model.lora.train_lora`](slideflow/model/lora.py); it uses the [shared FastAI trainer](slideflow/mil/train/_fastai.py), with standard metric logging and checkpoint selection. [Full API details](docs-source/source/model.rst#lora-training).
+
 ## 🚀 Features
 - Easy-to-use, highly customizable training pipelines
 - Robust **[slide processing](https://slideflow.dev/slide_processing) and [stain normalization](https://slideflow.dev/norm)** toolkit

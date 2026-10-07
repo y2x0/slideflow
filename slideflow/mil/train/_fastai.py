@@ -16,7 +16,7 @@ from .._params import TrainerConfig
 
 # -----------------------------------------------------------------------------
 
-def train(learner, config, callbacks=None):
+def train(learner, config, callbacks=None, lr=None):
     """Train an attention-based multi-instance learning model with FastAI.
 
     Args:
@@ -25,6 +25,7 @@ def train(learner, config, callbacks=None):
 
     Keyword args:
         callbacks (list(fastai.Callback)): FastAI callbacks. Defaults to None.
+        lr (float or list): Optional learning rate override, including parameter groups.
     """
     cbs = [
         SaveModelCallback(fname=f"best_valid", monitor=config.save_monitor),
@@ -33,17 +34,17 @@ def train(learner, config, callbacks=None):
     if callbacks:
         cbs += callbacks
     if config.fit_one_cycle:
-        if config.lr is None:
+        if lr is None and config.lr is None:
             lr = learner.lr_find().valley
             log.info(f"Using auto-detected learning rate: {lr}")
-        else:
+        elif lr is None:
             lr = config.lr
         learner.fit_one_cycle(n_epoch=config.epochs, lr_max=lr, cbs=cbs)
     else:
-        if config.lr is None:
+        if lr is None and config.lr is None:
             lr = learner.lr_find().valley
             log.info(f"Using auto-detected learning rate: {lr}")
-        else:
+        elif lr is None:
             lr = config.lr
         learner.fit(n_epoch=config.epochs, lr=lr, wd=config.wd, cbs=cbs)
     return learner
@@ -155,6 +156,12 @@ def build_learner(
 
     # Create learning and fit.
     dls = DataLoaders(train_dl, val_dl)
-    learner = Learner(dls, model, loss_func=loss_func, metrics=config.get_metrics(), path=outdir)
+    learner = build_learner_from_dls(config, dls, model, loss_func=loss_func, path=outdir)
 
     return learner, (n_in, n_out)
+
+
+def build_learner_from_dls(config, dls, model, *, loss_func, metrics=None, **kwargs):
+    """Build the shared FastAI learner from prepared data and a prediction model."""
+    return Learner(dls, model, loss_func=loss_func,
+                   metrics=config.get_metrics() if metrics is None else metrics, **kwargs)
