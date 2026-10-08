@@ -117,6 +117,38 @@ def test_padding_does_not_change_predictions(head, extractor):
         torch.testing.assert_close(model(tiles), model(padded, torch.tensor([2])), atol=1e-6, rtol=1e-5)
 
 
+@pytest.mark.parametrize('head', ['nnmil', 'attention_mil', 'bistro.transformer'])
+@pytest.mark.parametrize('checkpoint_blocks', [False, True])
+def test_matched_control_and_joint_gradients(head, checkpoint_blocks, extractor):
+    torch.manual_seed(23)
+    config = config_for(head)
+    config.model_config.model_kwargs['checkpoint_blocks'] = checkpoint_blocks
+    adapted = config.build_model(3, 2)
+    config.model_config.model_kwargs['adapt'] = False
+    frozen = config.build_model(3, 2)
+    # Adapter initialization consumes RNG draws before the head is constructed.
+    frozen.head.load_state_dict(adapted.head.state_dict())
+    tiles = torch.randint(0, 256, (2, 3, 16, 16, 3), dtype=torch.uint8)
+    lens = torch.tensor([3, 3])
+    adapted.eval()
+    frozen.eval()
+    with torch.no_grad():
+        torch.testing.assert_close(adapted(tiles, lens), frozen(tiles, lens),
+                                   atol=1e-6, rtol=1e-5)
+
+    for model in (adapted, frozen):
+        model.train()
+        loss = torch.nn.functional.cross_entropy(model(tiles, lens), torch.tensor([0, 1]))
+        loss.backward()
+        assert any(p.grad is not None and p.grad.abs().sum() > 0
+                   for p in model.head.parameters())
+        assert all(p.grad is None for p in model.encoder.parameters() if not p.requires_grad)
+    adapter_grads = [p.grad for p in adapted.encoder.parameters() if p.requires_grad]
+    assert adapter_grads and all(g is not None and torch.isfinite(g).all() for g in adapter_grads)
+    assert any(g.abs().sum() > 0 for g in adapter_grads)
+    assert all(not p.requires_grad and p.grad is None for p in frozen.encoder.parameters())
+
+
 def test_patient_bag_loading_preserves_all_slides(tmp_path):
     paths = []
     for i, count in enumerate([2, 3]):
