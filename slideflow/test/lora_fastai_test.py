@@ -3,6 +3,7 @@
 import slideflow.mil.extensions
 
 import copy
+import importlib.util
 import json
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -17,6 +18,11 @@ from slideflow.mil import mil_config
 from slideflow.mil._extension_data import InstanceBagDataset as BagDataset
 from slideflow.mil.train import _fastai
 from slideflow.test.lora_train_test import Extractor
+
+HEADS = ['nnmil', 'attention_mil', 'bistro.transformer',
+         pytest.param('transmil', marks=pytest.mark.skipif(
+             importlib.util.find_spec('nystrom_attention') is None,
+             reason='TransMIL requires nystrom_attention'))]
 
 
 @pytest.fixture
@@ -58,7 +64,8 @@ def fixtures(tmp_path):
 def config_for(head='nnmil', **kwargs):
     options = {'hidden_dim': 8, 'dropout_p': 0} if head == 'nnmil' else (
         {'z_dim': 8, 'dropout_p': 0} if head == 'attention_mil' else
-        {'dim': 16, 'depth': 1, 'heads': 2, 'dim_head': 8, 'mlp_dim': 16})
+        {'dim': 16, 'depth': 1, 'heads': 2, 'dim_head': 8, 'mlp_dim': 16}
+        if head == 'bistro.transformer' else {})
     return mil_config('lora', epochs=2, lr=1e-3, batch_size=2,
                       bag_size=4, drop_last=False, num_workers=0,
                       model_kwargs=dict(encoder='tiny', head=head, head_kwargs=options,
@@ -66,7 +73,7 @@ def config_for(head='nnmil', **kwargs):
                                         tile_batch_size=2), **kwargs)
 
 
-@pytest.mark.parametrize('head', ['nnmil', 'attention_mil', 'bistro.transformer'])
+@pytest.mark.parametrize('head', HEADS)
 @pytest.mark.parametrize('level', ['slide', 'patient'])
 def test_train_mil_roundtrip(head, level, extractor, tmp_path):
     torch.manual_seed(17)
@@ -108,7 +115,7 @@ def test_train_mil_roundtrip(head, level, extractor, tmp_path):
     assert torch.load(root / 'adapters.pt', weights_only=True)
 
 
-@pytest.mark.parametrize('head', ['nnmil', 'attention_mil', 'bistro.transformer'])
+@pytest.mark.parametrize('head', HEADS)
 def test_padding_does_not_change_predictions(head, extractor):
     model = config_for(head).build_model(3, 2).eval()
     tiles = torch.randint(0, 256, (1, 2, 16, 16, 3), dtype=torch.uint8)
@@ -117,7 +124,49 @@ def test_padding_does_not_change_predictions(head, extractor):
         torch.testing.assert_close(model(tiles), model(padded, torch.tensor([2])), atol=1e-6, rtol=1e-5)
 
 
-@pytest.mark.parametrize('head', ['nnmil', 'attention_mil', 'bistro.transformer'])
+@pytest.mark.parametrize('head', HEADS)
+def test_attention_matches_tile_count(head, extractor):
+    model = config_for(head).build_model(3, 2).eval()
+    tiles = torch.randint(0, 256, (1, 3, 16, 16, 3), dtype=torch.uint8)
+    with torch.no_grad():
+        prediction, attention = model(tiles, return_attention=True)
+        torch.testing.assert_close(prediction, model(tiles))
+    assert attention.shape[:2] == (1, 3)
+    assert torch.isfinite(attention).all()
+
+
+def test_multimodal_head_rejected(extractor):
+    with pytest.raises(ValueError, match='single-input'):
+        config_for('mm_attention_mil').build_model(3, 2)
+
+
+@pytest.mark.parametrize('head', [HEADS[2], HEADS[3]])
+def test_padded_attention_requires_length_aware_head(head, extractor):
+    model = config_for(head).build_model(3, 2).eval()
+    tiles = torch.randint(0, 256, (1, 4, 16, 16, 3), dtype=torch.uint8)
+    with pytest.raises(ValueError, match='length-aware'):
+        model(tiles, torch.tensor([2]), return_attention=True)
+
+
+@pytest.mark.parametrize('head', [HEADS[2], HEADS[3]])
+def test_unsupported_head_uq_is_explicit(head, extractor):
+    model = config_for(head).build_model(3, 2).eval()
+    tiles = torch.randint(0, 256, (1, 3, 16, 16, 3), dtype=torch.uint8)
+    with pytest.raises(ValueError, match='does not support UQ'):
+        model(tiles, uq=True)
+
+
+def test_loader_with_worker_process(extractor, tmp_path):
+    folder, train, val = fixtures(tmp_path)
+    config = config_for()
+    config.model_config.num_workers = 1
+    learner = sf.mil.build_fastai_learner(config, train, val, 'label', str(folder),
+                                        outdir=str(tmp_path), device='cpu')
+    tiles, lengths, target = learner.dls.train.one_batch()
+    assert tiles.dtype == torch.uint8 and len(tiles) == len(lengths) == len(target) == 2
+
+
+@pytest.mark.parametrize('head', HEADS)
 @pytest.mark.parametrize('checkpoint_blocks', [False, True])
 def test_matched_control_and_joint_gradients(head, checkpoint_blocks, extractor):
     torch.manual_seed(23)
@@ -161,10 +210,10 @@ def test_patient_bag_loading_preserves_all_slides(tmp_path):
     assert sorted(tiles[:, 0, 0, 0].tolist()) == [0, 0, 1, 1, 2, 2, 2]
 
 
-@pytest.mark.parametrize('level', ['slide'])
-def test_regression_and_frozen_control(level, extractor, tmp_path):
+@pytest.mark.parametrize('head', HEADS)
+def test_regression_and_frozen_control(head, extractor, tmp_path):
     folder, train, val = fixtures(tmp_path)
-    config = config_for(loss='mse', fit_one_cycle=False, aggregation_level=level)
+    config = config_for(head, loss='mse', fit_one_cycle=False, aggregation_level='slide')
     config.model_config.model_kwargs['adapt'] = False
     learner = sf.mil.train_mil(config, train, val, 'score', str(folder),
                                outdir=str(tmp_path / 'regression'), device='cpu')

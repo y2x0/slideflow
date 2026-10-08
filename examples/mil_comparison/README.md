@@ -34,7 +34,16 @@ learner = project.train_mil(
 )
 ```
 
-Use `head='attention_mil'` with `head_kwargs={'z_dim': 256}` for AMIL, or `head='bistro.transformer'` with its constructor arguments. Mettle uses `encoder='mettle'` and a local checkpoint. Heads operate on features from the encoder. Length-aware heads receive bag lengths; other heads receive individually trimmed bags. Multimodal and coordinate-dependent heads require a different input contract.
+Use `head='attention_mil'` with `head_kwargs={'z_dim': 256}` for AMIL, `head='bistro.transformer'` with its constructor arguments, or `head='transmil'` with `head_kwargs={}`. TransMIL requires the optional `nystrom-attention` package (`python -m pip install nystrom-attention`). Mettle uses `encoder='mettle'` and a local checkpoint. Heads operate on features from the encoder. Length-aware heads receive bag lengths; other heads receive individually trimmed bags. Multimodal and coordinate-dependent heads require a different input contract.
+
+| Head | Slide/patient classification | Slide regression | Head UQ |
+| --- | --- | --- | --- |
+| `nnmil` | Tested | Tested | Tested |
+| `attention_mil` | Tested | Tested | Tested |
+| `bistro.transformer` | Tested | Tested | Unsupported |
+| `transmil` | Tested | Tested | Unsupported |
+
+These checks use a tiny encoder and synthetic RGB bags on CPU. They cover the ordinary trainer, frozen controls, adapter/head gradients with and without activation checkpointing, bag padding, and classification checkpoint reload. TransMIL was tested with `nystrom-attention==0.0.14`. Other registered heads are not covered by this matrix. nnMIL can also be imported directly from `slideflow.mil.models.nnmil` without importing the LoRA modules.
 
 The normal `train_mil` code resolves annotation labels and slide/patient grouping, then the normal FastAI builder calls the registered model configuration's dataloader hook and `config.build_model`. The added configuration supplies an image-aware bag dataset only for the new models. The existing trainer still controls losses, class weighting, learning rate, epochs, scheduling, checkpoint selection and result exports. There is no separate LoRA trainer or replacement training function. Choosing a head does not inherit that head's model-configuration sampler settings.
 
@@ -67,6 +76,20 @@ Runs use the unchanged trainer's history, manifests, MIL parameters, predictions
 The restored Slideflow code cannot format patient-level regression targets correctly during evaluation. The added configurations reject patient-level regression explicitly. Slide-level regression and slide/patient classification are supported. No upstream regression fix or split-checking behavior is installed. The caller must provide patient-disjoint train/validation datasets, as for ordinary MIL.
 
 Patient-level attention from the added models is suppressed because the unchanged exporter assumes slide names; do not request patient attention heatmaps. Slide attention requires coordinates matching the tile order. These limits are retained rather than modifying shared Slideflow code.
+
+For TransMIL and Bistro, attention requests must use unpadded bags one at a time, as the normal prediction path does. Direct attention requests with external padding raise an error; ordinary padded training and prediction remain supported. Attention outputs retain the selected head's native meaning; TransMIL exposes per-tile latent channels rather than normalized scalar attention weights.
+
+The generic module does not package a complete study-specific training protocol. Joint classification/regression targets, separate adapter/head learning rates, cohort splits and a later feature-extraction/head-refit stage require their own configuration or workflow. Full pretrained-encoder GPU validation and cohort performance evaluation remain separate from the local software checks. Encoder support is limited to compatible timm ViTs with packed Q/K/V projections.
+
+Run the extension tests from the checkout with:
+
+```sh
+SF_BACKEND=torch SF_SLIDE_BACKEND=libvips OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+python -m pytest -q slideflow/test/extensions_test.py slideflow/test/lora_fastai_test.py \
+slideflow/test/lora_train_test.py slideflow/test/nnmil_test.py slideflow/test/nnmil_integration_test.py
+```
+
+TransMIL cases are skipped when its optional dependency is absent; install it to run the full matrix.
 
 After best-model selection, optional deployment exports are:
 

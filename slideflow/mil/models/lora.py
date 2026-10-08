@@ -28,6 +28,10 @@ class LoRA(nn.Module):
             raise ValueError('tile_batch_size must be a positive integer')
         if not isinstance(encoder, str) or not isinstance(head, str) or head == 'lora':
             raise ValueError('encoder and head must be registered names; head cannot be lora')
+        head_class = sf.mil.get_model(head)
+        if (getattr(head_class, 'is_multimodal', False)
+                or getattr(head_class, 'multimodal', False)):
+            raise ValueError('LoRA requires a single-input MIL head')
         options = dict(encoder_kwargs or {})
         options.setdefault('device', 'cpu')
         extractor = sf.build_feature_extractor(encoder, **options)
@@ -47,9 +51,6 @@ class LoRA(nn.Module):
         self.adapt = adapt
         self.tile_batch_size = tile_batch_size
         self.checkpoint_blocks = checkpoint_blocks
-        head_class = sf.mil.get_model(head)
-        if getattr(head_class, 'is_multimodal', False):
-            raise ValueError('LoRA requires a single-input MIL head')
         self.head = head_class(self.num_features, n_out, **(head_kwargs or {}))
         self.uq_uses_softmax = 'uq_softmax' in inspect.signature(self.head.forward).parameters
         self.train()
@@ -99,6 +100,10 @@ class LoRA(nn.Module):
         if uq_softmax is None:
             uq_softmax = getattr(self, 'uq_apply_softmax', True)
         features, lens = self._features(bags, lens)
+        if (return_attention and not getattr(self.head, 'use_lens', False)
+                and torch.any(lens != features.shape[1])):
+            raise ValueError('attention for padded bags requires a length-aware head; '
+                             'pass each unpadded bag separately')
         params = inspect.signature(self.head.forward).parameters
         kwargs = {}
         if uq:

@@ -5,6 +5,23 @@ import subprocess
 import sys
 
 
+def test_nnmil_import_is_independent_of_lora():
+    script = '''
+import sys
+import torch
+from slideflow.mil.models.nnmil import NNMIL
+
+model = NNMIL(16, 2, hidden_dim=8).eval()
+assert model(torch.randn(2, 4, 16)).shape == (2, 2)
+assert 'slideflow.mil.models.lora' not in sys.modules
+assert 'slideflow.model.lora' not in sys.modules
+assert 'slideflow.model.extractors._lora' not in sys.modules
+'''
+    result = subprocess.run([sys.executable, '-c', script], env=dict(os.environ),
+                            text=True, capture_output=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_extension_import_does_not_replace_existing_behavior():
     script = r'''
 import torch
