@@ -36,6 +36,8 @@ learner = project.train_mil(
 
 Use `head='attention_mil'` with `head_kwargs={'z_dim': 256}` for AMIL, `head='bistro.transformer'` with its constructor arguments, or `head='transmil'` with `head_kwargs={}`. TransMIL requires the optional `nystrom-attention` package (`python -m pip install nystrom-attention`). Mettle uses `encoder='mettle'` and a local checkpoint. Heads operate on features from the encoder. Length-aware heads receive bag lengths; other heads receive individually trimmed bags. Multimodal and coordinate-dependent heads require a different input contract.
 
+The unchanged Bistro implementation requires `dim == mlp_dim == heads * dim_head`. Its defaults satisfy this; a smaller valid example is `{'dim': 128, 'mlp_dim': 128, 'heads': 4, 'dim_head': 32, 'depth': 1}`.
+
 | Head | Slide/patient classification | Slide regression | Head UQ |
 | --- | --- | --- | --- |
 | `nnmil` | Tested | Tested | Tested |
@@ -44,6 +46,8 @@ Use `head='attention_mil'` with `head_kwargs={'z_dim': 256}` for AMIL, `head='bi
 | `transmil` | Tested | Tested | Unsupported |
 
 These checks use a tiny encoder and synthetic RGB bags on CPU. They cover the ordinary trainer, frozen controls, adapter/head gradients with and without activation checkpointing, bag padding, and classification checkpoint reload. TransMIL was tested with `nystrom-attention==0.0.14`. Other registered heads are not covered by this matrix. nnMIL can also be imported directly from `slideflow.mil.models.nnmil` without importing the LoRA modules.
+
+A bounded NVIDIA H200 check on 8 October 2026 also passed all four heads with local pretrained H-Optimus and Mettle encoders: eight LoRA combinations, followed by standalone nnMIL fits on embeddings from each encoder. Each fit used six training and four held-out patients, four cached tiles per patient, and one epoch. The tests verified unchanged frozen encoder weights, changed adapters and heads, finite losses, patient grouping, and identical predictions after checkpoint reload. The 61-test software suite also passed in the cluster environment. An initial Bistro test configuration had inconsistent dimensions; the corrected configuration above passed. This establishes execution on real encoders and cached tiles, not cohort accuracy or full-scale memory requirements.
 
 The normal `train_mil` code resolves annotation labels and slide/patient grouping, then the normal FastAI builder calls the registered model configuration's dataloader hook and `config.build_model`. The added configuration supplies an image-aware bag dataset only for the new models. The existing trainer still controls losses, class weighting, learning rate, epochs, scheduling, checkpoint selection and result exports. There is no separate LoRA trainer or replacement training function. Choosing a head does not inherit that head's model-configuration sampler settings.
 
@@ -79,7 +83,7 @@ Patient-level attention from the added models is suppressed because the unchange
 
 For TransMIL and Bistro, attention requests must use unpadded bags one at a time, as the normal prediction path does. Direct attention requests with external padding raise an error; ordinary padded training and prediction remain supported. Attention outputs retain the selected head's native meaning; TransMIL exposes per-tile latent channels rather than normalized scalar attention weights.
 
-The generic module does not package a complete study-specific training protocol. Joint classification/regression targets, separate adapter/head learning rates, cohort splits and a later feature-extraction/head-refit stage require their own configuration or workflow. Full pretrained-encoder GPU validation and cohort performance evaluation remain separate from the local software checks. Encoder support is limited to compatible timm ViTs with packed Q/K/V projections.
+The generic module does not package a complete study-specific training protocol. Joint classification/regression targets, separate adapter/head learning rates, cohort splits and a later feature-extraction/head-refit stage require their own configuration or workflow. Full-scale resource validation and cohort performance evaluation remain separate from the bounded execution checks. Encoder support is limited to compatible timm ViTs with packed Q/K/V projections.
 
 Run the extension tests from the checkout with:
 
