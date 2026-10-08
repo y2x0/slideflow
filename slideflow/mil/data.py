@@ -65,7 +65,7 @@ def _to_fixed_size_bag(
     zero_padded = torch.cat(
         (
             bag_samples,
-            torch.zeros(bag_size - bag_samples.shape[0], bag_samples.shape[1]),
+            bag.new_zeros((bag_size - bag_samples.shape[0], *bag_samples.shape[1:])),
         )
     )
     return zero_padded, min(bag_size, len(bag))
@@ -130,18 +130,7 @@ class BagDataset(Dataset):
         return len(self.bags)
 
     def _load(self, index: int):
-        if isinstance(self.bags[index], str):
-            feats = torch.load(self.bags[index]).to(self.dtype)
-        elif isinstance(self.bags[index], np.ndarray):
-            feats = torch.from_numpy(self.bags[index]).to(self.dtype)
-        elif isinstance(self.bags[index], torch.Tensor):
-            feats = self.bags[index].to(self.dtype)
-        else:
-            feats = torch.cat([
-                torch.load(slide).to(self.dtype)
-                for slide in self.bags[index]
-            ])
-        return feats
+        return utils._load_bag(self.bags[index], dtype=self.dtype)
 
     def __getitem__(self, index: int) -> Tuple[torch.Tensor, int]:
         # collect all the features

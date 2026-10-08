@@ -57,44 +57,43 @@ Other functions
 LoRA training
 *************
 
-``slideflow.model.lora`` uses Slideflow's existing FastAI MIL trainer for raw-tile encoder adaptation. A wrapper combines a compatible timm ViT encoder and any PyTorch bag model; the shared learner factory supplies metrics and the shared trainer supplies scheduling, CSV logging and best-model selection. LoRA has no dependency on nnMIL or a particular outcome.
+LoRA is registered as ``mil_config('lora', ...)`` and uses the normal ``project.train_mil`` pipeline. The model contains a compatible timm ViT encoder and a selectable MIL aggregation head. There is no separate LoRA trainer.
 
 .. code-block:: python
 
-    import slideflow as sf
     from slideflow.mil import mil_config
-    from slideflow.model.lora import train_lora
 
-    extractor = sf.build_feature_extractor(
-        'hoptimus0', weights='/path/to/base/pytorch_model.bin')
-    config = mil_config('attention_mil', lr=2e-4, epochs=8)
-    head = config.build_model(extractor.num_features, 2)
-    learner = train_lora(
-        extractor, head, train_batches,
-        config=config, val_batches=validation_batches,
-        outcomes='label', categories=['negative', 'positive'],
-        first_block=32, rank=8, alpha=16,
-        lr_adapter=5e-5, seed=42,
-        outdir='runs/fold0', return_learner=True)
+    config = mil_config(
+        'lora',
+        aggregation_level='patient',
+        lr=5e-5, epochs=8, batch_size=2, bag_size=32,
+        model_kwargs={
+            'encoder': 'hoptimus0',
+            'encoder_kwargs': {'weights': '/path/to/base/pytorch_model.bin'},
+            'head': 'nnmil',  # or 'attention_mil', 'bistro.transformer'
+            'head_kwargs': {'hidden_dim': 256},
+            'first_block': 32, 'rank': 8, 'alpha': 16,
+            'tile_batch_size': 16,
+        },
+    )
+    learner = project.train_mil(
+        config=config, outcomes='label',
+        train_dataset=train, val_dataset=val,
+        bags='/path/to/rgb_tile_bags',
+        outdir='runs/adaptation',
+    )
 
-Choose ``nnmil`` or ``bistro.transformer`` when constructing the configuration to use a different head. Model-specific arguments belong in ``model_kwargs``. ``config`` controls loss, weighted classification loss, metrics, epochs, weight decay, scheduling and checkpoint monitor. Regression uses ``mil_config(..., loss='mse')`` with floating-point targets. ``loss_fn`` overrides the configured loss; ``metrics`` overrides configured metrics; ``callbacks`` adds standard FastAI callbacks. Explicit ``epochs`` and ``lr_head`` override those settings. Otherwise the head uses ``config.lr``, with a separate adapter learning rate. When ``config.lr`` is None, the shared trainer uses FastAI's learning-rate finder.
+Choose ``head='attention_mil'`` with ``head_kwargs={'z_dim': 256}``, or ``head='bistro.transformer'`` with its constructor arguments. ``encoder='mettle'`` uses a local Mettle checkpoint. Encoders need compatible packed Q/K/V projections and a Slideflow transform/feature-width interface.
 
-A run saves ``history.csv``, ``models/best_valid.pth``, ``mil_params.json`` and ``predictions.parquet``. Validation results use Slideflow's ordinary classification/regression metric functions and plots. The best-model callback restores the selected encoder/head checkpoint before validation export. ``adapters.pt`` and ``head.pt`` are exported from that same selected model, and ``history.json`` records adapter settings and epoch metrics. The standard FastAI checkpoint contains the full encoder and head; adapter-only weights remain available for deployment. ``sf.mil.load_model_weights(run_directory)`` loads the exported head, which must be used with features from its matching adapted encoder.
+The bags directory contains one ``slide_name.pt`` tensor per slide: uint8 RGB tiles shaped ``(tiles, height, width, 3)``, before normalization. Existing cached tiles may be repacked; precomputed feature vectors cannot propagate encoder gradients. This interface reads tensor bags, not WSI/TFRecord streams. The existing bag loader reads complete files before sampling. Use small ``bag_size`` and ``batch_size`` settings; ``tile_batch_size`` chunks encoding and ``checkpoint_blocks=True`` checkpoints adapted transformer blocks.
 
-For customization before fitting, call ``build_lora_learner(extractor, head, train_batches, validation_batches, config=config, ...)``. It returns a normal FastAI Learner without training. Standard Learner methods and callbacks can then be used (use ``get_preds(reorder=False)`` with these pre-batched iterable loaders); the high-level ``train_lora`` call handles the complete training and result-export sequence. For compatibility, ``train_lora`` returns a history list unless ``return_learner=True``. The earlier loss-only call is also supported and now uses FastAI rather than a separate optimizer loop.
+Slide/patient grouping, annotation encoding, bag sampling, class weights, metrics, optimizer schedule and checkpoint selection all remain in the standard training path. The encoder is frozen except for its adapters. ``adapt=False`` provides a frozen-encoder control with the same head, data and trainer. The head uses bag lengths where supported; other heads receive trimmed bags. Head-specific trainer settings, such as nnMIL balanced sampling, are not implicitly copied to the wrapper. Multi-input or coordinate-dependent heads require a separate input contract.
 
-Batches contain ``(tiles, targets)`` or ``(tiles, targets, lengths)``. Tiles are uint8 tensors shaped ``(bags, tiles, height, width, 3)``. Lengths mark valid tiles in padded bags. Dictionary batches use ``tiles``, ``targets`` and optional ``lengths`` keys; ``slide`` and ``patient`` can supply one identifier per bag for saved validation predictions. Without identifiers, deterministic row identifiers are assigned. Targets can be tensors or nested dictionaries/tuples. Cross entropy accepts integer class indices or one-hot targets; floating-point targets are converted to float32. The ROC metric handles class indices with the same target encoding as Slideflow's saved-feature loaders. Categories must match the target indices; supplying all categories also covers a class absent from training when weighting the loss.
+Runs save the standard history, manifest, MIL parameters, predictions, metric plots and ``models/best_valid.pth``. That checkpoint contains the full encoder and head. ``sf.mil.load_model_weights(run_directory)`` restores the full raw-tile model; keep the base checkpoint available at its configured path. Patient predictions and metrics retain patient IDs; patient attention is not mapped onto individual slide heatmaps.
 
-The extractor supplies normalization. Loaders must be sized and re-iterable; their sampling and grouping are preserved. Supply patient-grouped splits and tile sampling outside the trainer. ``config.aggregation_level`` describes the caller's bag grouping; this API does not regroup raw tile loaders. Validation uses the same forward callback and loss as training. Without a validation loader, checkpoint selection uses training loss and no held-out validation artifacts are produced.
+Use ``sf.mil.build_fastai_learner`` to customize training with ordinary FastAI callbacks. Regression uses ``loss='mse'``; other objectives follow normal custom MIL configurations. After best-model selection, ``learner.model.export_adapters('adapters.pt')`` and ``torch.save(learner.model.head.state_dict(), 'head.pt')`` create deployment weights. Reload adapters with matching first-block, rank and alpha settings into the same base extractor. nnMIL's ``NNMIL.from_checkpoint`` supports current and legacy head names.
 
-Models with ``use_lens=True`` receive ``head(features, lengths)``; other models receive ``head(features)`` and require unpadded bags. To support another signature, metadata, or structured outputs, supply ``forward_fn(head, features, lengths, batch)``. The batch is available for coordinates or auxiliary inputs. ``loss_fn(outputs, targets)`` must return a finite scalar tensor. Structured objectives also supply compatible ``metrics``; for standard validation exports, ``prediction_fn(outputs, targets, slide_ids)`` returns a DataFrame with Slideflow outcome columns. Use this callback for task-specific prediction decoding.
+The former ``train_lora``, ``build_lora_learner`` and ``predict_lora`` entry points have been replaced by ``train_mil``, ``build_fastai_learner`` and ``predict_mil``. Existing independent-loader callers must supply slide-named tile bags and standard Slideflow datasets.
 
-``predict_lora`` remains a raw prediction helper: it returns lists of detached outputs and targets, one entry per batch, preserving dictionaries and tuples. Apply task-specific decoding in the caller. The saved validation table uses standard classification probabilities or continuous regression outputs.
-
-Base encoder weights stay frozen; adapters and the head update together. ``first_block`` defaults to the last eight blocks. A fresh extractor with ``adapt=False`` provides a frozen-encoder control through the same training path. ``seed`` covers adapter initialization and training randomness; seed head construction and loader sampling separately.
-
-H-Optimus-0 and Mettle extractors support adapter loading. Other encoders require a compatible timm ViT structure with packed query/key/value projections. Reload adapters with matching ``lora_first_block``, ``lora_rank`` and ``lora_alpha`` settings; preserve the model configuration and target encoding. nnMIL also provides ``NNMIL.from_checkpoint`` for current and legacy parameter names. Features extracted after adaptation can be used for ordinary saved-feature MIL training and architecture comparisons.
-
-.. autofunction:: slideflow.model.lora.build_lora_learner
-.. autofunction:: slideflow.model.lora.train_lora
-.. autofunction:: slideflow.model.lora.predict_lora
+.. autoclass:: slideflow.mil.models.LoRA
+    :members: export_adapters

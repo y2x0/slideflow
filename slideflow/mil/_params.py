@@ -25,7 +25,7 @@ def mil_config(model: Union[str, Callable], trainer: str = 'fastai', **kwargs):
     Args:
         model (str, Callable): Either the name of a model, or a custom torch
             module. Valid model names include ``"attention_mil"``,
-            ``"transmil"``, ``"nnmil"``, and ``"bistro.transformer"``.
+            ``"transmil"``, ``"nnmil"``, ``"lora"``, and ``"bistro.transformer"``.
         trainer (str): Type of MIL trainer to use. Only 'fastai' is available,
             unless additional trainers are installed.
         **kwargs: All additional keyword arguments are passed to
@@ -66,7 +66,7 @@ class TrainerConfig:
         Args:
             model (str, Callable): Either the name of a model, or a custom torch
                 module. Valid model names include ``"attention_mil"``,
-                ``"transmil"``, ``"nnmil"``, and ``"bistro.transformer"``.
+                ``"transmil"``, ``"nnmil"``, ``"lora"``, and ``"bistro.transformer"``.
 
         Keyword args:
             aggregation_level (str): When equal to ``'slide'`` each bag
@@ -792,6 +792,8 @@ class MILModelConfig:
 
         dataset_kwargs = dataset_kwargs or dict()
         dataloader_kwargs = dataloader_kwargs or dict()
+
+        dataset_kwargs.setdefault('dtype', getattr(self.model_fn, 'input_dtype', torch.float32))
 
         if 'use_lens' not in dataset_kwargs:
             dataset_kwargs['use_lens'] = self.use_lens

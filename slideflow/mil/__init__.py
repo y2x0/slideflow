@@ -62,3 +62,8 @@ def nnmil():
 def bistro_transformer():
     from .models.bistro import Transformer
     return Transformer
+
+@register_model('lora')
+def lora():
+    from .models import LoRA
+    return LoRA

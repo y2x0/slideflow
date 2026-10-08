@@ -1,176 +1,194 @@
-"""Check LoRA training uses the same FastAI callbacks, metrics and result files."""
+"""Exercise raw-tile LoRA through the ordinary MIL training pipeline."""
 
 import copy
 import json
-from unittest.mock import patch
+from pathlib import Path
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pandas as pd
 import pytest
 import torch
-from torch import nn
-from fastai.callback.core import Callback
-from fastai.learner import Learner
 
 import slideflow as sf
 from slideflow.mil import mil_config
+from slideflow.mil.data import BagDataset
 from slideflow.mil.train import _fastai
-from slideflow.model.lora import build_lora_learner, train_lora, predict_lora
-from slideflow.test.lora_train_test import Extractor, batches
+from slideflow.test.lora_train_test import Extractor
 
 
-class Events(Callback):
-    def before_fit(self):
-        self.started = True
+@pytest.fixture
+def extractor():
+    base = Extractor()
+    base.num_features = 16
+    with patch('slideflow.build_feature_extractor', side_effect=lambda *a, **kw: copy.deepcopy(base)):
+        yield base
 
-    def after_backward(self):
-        self.adapter_gradient = any(param.grad is not None and param.grad.abs().sum() > 0
-                                    for name, param in self.model.named_parameters() if '.Bq' in name)
+
+def dataset(slides, labels, patients):
+    result = Mock(spec=sf.Dataset)
+    result.slides.return_value = slides
+    result.patients.return_value = {s: patients[s] for s in slides}
+
+    def get_labels(outcomes, format='name', use_float=False):
+        values = {s: ([float(labels[s])] if use_float else
+                      labels[s] if format == 'id' else str(labels[s])) for s in slides}
+        return values, sorted(set(values.values())) if not use_float else []
+
+    result.labels.side_effect = get_labels
+    result.get_bags.side_effect = lambda folder: np.array([str(Path(folder) / f'{s}.pt') for s in slides])
+    return result
 
 
-@pytest.mark.parametrize('architecture', ['nnmil', 'attention_mil', 'bistro.transformer'])
-def test_native_metrics_callbacks_and_results(architecture, tmp_path):
-    torch.manual_seed(19)
-    kwargs = {'hidden_dim': 8} if architecture == 'nnmil' else (
-        {'z_dim': 8, 'dropout_p': 0} if architecture == 'attention_mil' else
+def fixtures(tmp_path):
+    folder = tmp_path / 'tiles'
+    folder.mkdir()
+    slides = [f'slide{i}' for i in range(10)]
+    patients = {s: f'patient{i // 2}' for i, s in enumerate(slides)}
+    labels = {s: (i // 2) % 2 for i, s in enumerate(slides)}
+    for i, slide in enumerate(slides):
+        torch.save(torch.randint(0, 256, (i % 3 + 1, 16, 16, 3), dtype=torch.uint8),
+                   folder / f'{slide}.pt')
+    return (folder, dataset(slides[:6], labels, patients),
+            dataset(slides[6:], labels, patients))
+
+
+def config_for(head='nnmil', **kwargs):
+    options = {'hidden_dim': 8, 'dropout_p': 0} if head == 'nnmil' else (
+        {'z_dim': 8, 'dropout_p': 0} if head == 'attention_mil' else
         {'dim': 16, 'depth': 1, 'heads': 2, 'dim_head': 8, 'mlp_dim': 16})
-    config = mil_config(architecture, lr=1e-3, epochs=2, model_kwargs=kwargs)
-    extractor = Extractor()
-    base = copy.deepcopy(extractor.model.state_dict())
-    head = config.build_model(16, 2)
-    train_loader = batches()
-    validation = []
-    for index, batch in enumerate(batches()):
-        validation.append({'tiles': batch[0], 'targets': batch[1],
-                           'slide': [f'slide_{index * 2}', f'slide_{index * 2 + 1}'],
-                           'patient': [f'patient_{index * 2}', f'patient_{index * 2 + 1}']})
-    events = Events()
-    root = tmp_path / architecture
-    with patch.object(_fastai, 'train', wraps=_fastai.train) as shared_train:
-        learner = train_lora(extractor, head, train_loader, val_batches=validation,
-                             config=config, first_block=1, rank=2, alpha=4,
-                             outdir=root, outcomes='label', categories=['a', 'b'],
-                             callbacks=[events], return_learner=True)
-    assert isinstance(learner, Learner)
-    assert shared_train.call_count == 1
-    assert events.started and events.adapter_gradient
-    assert 'roc_auc_score' in learner.recorder.metric_names
+    return mil_config('lora', epochs=2, lr=1e-3, batch_size=2,
+                      bag_size=4, drop_last=False,
+                      model_kwargs=dict(encoder='tiny', head=head, head_kwargs=options,
+                                        first_block=1, rank=2, alpha=4, dropout=0,
+                                        tile_batch_size=2), **kwargs)
+
+
+@pytest.mark.parametrize('head', ['nnmil', 'attention_mil', 'bistro.transformer'])
+@pytest.mark.parametrize('level', ['slide', 'patient'])
+def test_train_mil_roundtrip(head, level, extractor, tmp_path):
+    torch.manual_seed(17)
+    folder, train, val = fixtures(tmp_path)
+    config = config_for(head, aggregation_level=level)
+    # AMIL's batch norm needs at least two training bags.
+    if level == 'patient':
+        config.batch_size = 3
+    with patch.object(_fastai, 'build_learner', wraps=_fastai.build_learner) as build, \
+            patch.object(_fastai, 'train', wraps=_fastai.train) as fit, \
+            patch.object(config, 'build_model', wraps=config.build_model) as model_build:
+        learner = sf.mil.train_mil(config, train, val, 'label', str(folder),
+                                   outdir=str(tmp_path / 'runs'), device='cpu',
+                                   dataloader_kwargs={'num_workers': 0, 'persistent_workers': False})
+    assert build.call_count == fit.call_count == model_build.call_count == 1
+    assert len(learner.dls.train_ds) == (6 if level == 'slide' else 3)
+    assert len(learner.dls.valid_ds) == (4 if level == 'slide' else 2)
+    assert learner.dls.train.one_batch()[0].dtype == torch.uint8
+    model = learner.model.eval()
+    base = extractor.model.state_dict()
+    for name, parameter in model.encoder.named_parameters():
+        if not parameter.requires_grad:
+            torch.testing.assert_close(parameter, base[name.replace('.attn.qkv.base.', '.attn.qkv.')],
+                                       rtol=0, atol=0)
+    assert any(p.abs().sum() > 0 for name, p in model.encoder.named_parameters() if '.Bq' in name)
+    root = learner.path
     history = pd.read_csv(root / 'history.csv')
-    assert len(history) == config.epochs
+    assert len(history) == 2
     assert np.isfinite(history[['train_loss', 'valid_loss', 'roc_auc_score']]).all().all()
-    assert (root / 'models' / 'best_valid.pth').exists()
-    assert len(list(root.glob('*.png'))) + len(list(root.glob('*.svg'))) > 0
     frame = pd.read_parquet(root / 'predictions.parquet')
-    assert frame.slide.tolist() == [f'slide_{i}' for i in range(4)]
-    assert frame.patient.tolist() == [f'patient_{i}' for i in range(4)]
-    assert {'label-y_true', 'label-y_pred0', 'label-y_pred1'}.issubset(frame.columns)
-    np.testing.assert_allclose(frame[['label-y_pred0', 'label-y_pred1']].sum(axis=1), 1)
-    reference = predict_lora(extractor, head, validation)
-    before = torch.cat(reference['outputs'])
-    with torch.no_grad():
-        for param in learner.model.parameters():
-            if param.requires_grad:
-                param.add_(1)
-    learner.load('best_valid', with_opt=False)
-    restored = torch.cat(predict_lora(extractor, head, validation)['outputs'])
-    torch.testing.assert_close(restored, before, atol=0, rtol=0)
-    for name, param in extractor.model.named_parameters():
-        if not param.requires_grad:
-            base_name = name.replace('.attn.qkv.base.', '.attn.qkv.')
-            torch.testing.assert_close(param, base[base_name], atol=0, rtol=0)
+    assert len(frame) == (4 if level == 'slide' else 2)
+    assert set(frame[level]) == set(val.slides() if level == 'slide' else val.patients().values())
     params = json.loads((root / 'mil_params.json').read_text())
-    assert params['training_input'] == 'raw_tiles'
-    assert params['input_shape'] == 16
-    assert params['output_shape'] == 2
-    loaded_head, loaded_config = sf.mil.load_model_weights(str(root), strict=True)
-    features = torch.randn(2, 3, 16)
-    head.eval()
-    loaded_head.cpu().eval()
-    lengths = torch.full((2,), 3)
-    expected = head(features, lengths) if getattr(head, 'use_lens', False) else head(features)
-    actual = loaded_head(features, lengths) if getattr(loaded_head, 'use_lens', False) else loaded_head(features)
-    torch.testing.assert_close(expected, actual, atol=0, rtol=0)
-    assert loaded_config.model_config.model == architecture
+    assert params['params']['model'] == 'lora'
+    assert params['params']['model_kwargs']['head'] == head
+    restored, restored_config = sf.mil.load_model_weights(str(root), strict=True)
+    actual = sf.mil.predict_mil(restored, val, 'label', str(folder), config=restored_config)
+    np.testing.assert_allclose(actual.filter(like='y_pred'), frame.filter(like='y_pred'), atol=1e-6)
+    model.export_adapters(root / 'adapters.pt')
+    assert torch.load(root / 'adapters.pt', weights_only=True)
 
 
-def test_regression_metrics_and_config_preservation(tmp_path):
-    config = mil_config('nnmil', loss='mse', epochs=1, lr=1e-3, fit_one_cycle=False,
-                        model_kwargs={'hidden_dim': 8})
-    targets = torch.tensor([[0.], [0.5], [1.], [1.5]])
-    loader = batches(targets)
-    learner = train_lora(Extractor(), config.build_model(16, 1), loader,
-                         config=config, val_batches=loader, outdir=tmp_path / 'regression',
-                         outcomes='measurement', return_learner=True)
-    assert 'mse' in learner.recorder.metric_names
-    assert 'pearsonr' in learner.recorder.metric_names
-    assert {'measurement-y_true', 'measurement-y_pred'}.issubset(learner.lora_predictions.columns)
-    assert config.save_monitor == 'valid_loss'
-    assert config.epochs == 1
+@pytest.mark.parametrize('head', ['nnmil', 'attention_mil', 'bistro.transformer'])
+def test_padding_does_not_change_predictions(head, extractor):
+    model = config_for(head).build_model(3, 2).eval()
+    tiles = torch.randint(0, 256, (1, 2, 16, 16, 3), dtype=torch.uint8)
+    padded = torch.cat([tiles, torch.full_like(tiles, 255)], dim=1)
+    with torch.no_grad():
+        torch.testing.assert_close(model(tiles), model(padded, torch.tensor([2])), atol=1e-6, rtol=1e-5)
 
 
-def test_build_without_fitting_and_custom_metrics(tmp_path):
-    from fastai.vision.all import accuracy
-    config = mil_config('nnmil', epochs=1, lr=1e-3, model_kwargs={'hidden_dim': 8})
-    extractor, loader = Extractor(), batches()
-    learner = build_lora_learner(extractor, config.build_model(16, 2), loader, loader,
-                                 config=config, metrics=[accuracy], outdir=tmp_path / 'custom',
-                                 lr_adapter=1e-5, lr_head=1e-3)
-    assert isinstance(learner, Learner)
-    assert not (learner.path / 'history.csv').exists()
-    assert learner.lora_lrs == [1e-5, 1e-3]
-    _fastai.train(learner, learner.lora_config, lr=learner.lora_lrs)
-    assert 'accuracy' in pd.read_csv(learner.path / 'history.csv').columns
+def test_patient_bag_loading_preserves_all_slides(tmp_path):
+    paths = []
+    for i, count in enumerate([2, 3]):
+        path = tmp_path / f'{i}.pt'
+        torch.save(torch.full((count, 2, 2, 3), i + 1, dtype=torch.uint8), path)
+        paths.append(str(path))
+    bags = BagDataset(np.array([paths], dtype=object), bag_size=7, dtype=torch.uint8)
+    tiles, length = bags[0]
+    assert length == 5 and tiles.shape == (7, 2, 2, 3)
+    assert sorted(tiles[:, 0, 0, 0].tolist()) == [0, 0, 1, 1, 2, 2, 2]
 
 
-def test_structured_targets_use_fastai_with_custom_loss(tmp_path):
-    config = mil_config('nnmil', epochs=1, lr=1e-3, model_kwargs={'hidden_dim': 8})
-    extractor = Extractor()
-    head = config.build_model(16, 2)
-    tiles, targets = next(iter(batches()))
-    loader = [{'tiles': tiles, 'targets': {'class': targets}}]
-
-    def loss_fn(outputs, targets):
-        return nn.functional.cross_entropy(outputs, targets['class'])
-
-    def prediction_fn(outputs, targets, ids):
-        scores = outputs.softmax(-1).cpu().numpy()
-        return pd.DataFrame({'slide': ids, 'label-y_true': targets['class'].cpu().numpy(),
-                             'label-y_pred0': scores[:, 0], 'label-y_pred1': scores[:, 1]})
-
-    learner = train_lora(extractor, head, loader, config=config, loss_fn=loss_fn,
-                         metrics=[], val_batches=loader, outcomes='label',
-                         prediction_fn=prediction_fn, outdir=tmp_path / 'structured',
-                         return_learner=True)
-    assert (learner.path / 'predictions.parquet').exists()
-    assert isinstance(learner.lora_validation['targets'], dict)
+@pytest.mark.parametrize('level', ['slide', 'patient'])
+def test_regression_and_frozen_control(level, extractor, tmp_path):
+    folder, train, val = fixtures(tmp_path)
+    config = config_for(loss='mse', fit_one_cycle=False, aggregation_level=level)
+    config.model_config.model_kwargs['adapt'] = False
+    learner = sf.mil.train_mil(config, train, val, 'score', str(folder),
+                               outdir=str(tmp_path / 'regression'), device='cpu',
+                               dataloader_kwargs={'num_workers': 0, 'persistent_workers': False})
+    for name, value in learner.model.encoder.state_dict().items():
+        torch.testing.assert_close(value, extractor.model.state_dict()[name], atol=0, rtol=0)
+    history = pd.read_csv(learner.path / 'history.csv')
+    assert np.isfinite(history[['train_loss', 'valid_loss', 'mse']]).all().all()
+    with pytest.raises(ValueError, match='no adapters'):
+        learner.model.export_adapters(tmp_path / 'invalid.pt')
 
 
-def test_weighted_loss_with_class_absent_from_training(tmp_path):
-    config = mil_config('nnmil', epochs=1, lr=1e-3, model_kwargs={'hidden_dim': 8})
-    head = config.build_model(16, 3)
-    loader = batches()
-    val = batches(torch.tensor([0, 1, 2, 2]))
-    learner = build_lora_learner(Extractor(), head, loader, val, config=config,
-                                 categories=['a', 'b', 'c'], outdir=tmp_path / 'missing_class')
-    _fastai.train(learner, learner.lora_config, lr=learner.lora_lrs)
-    weights = learner.loss_func.fn.weight
-    torch.testing.assert_close(weights, torch.tensor([0.4, 0.4, 0.2]))
-    assert np.isfinite(pd.read_csv(learner.path / 'history.csv')['roc_auc_score']).all()
+def test_invalid_feature_input(extractor):
+    with pytest.raises(ValueError, match='RGB'):
+        config_for().build_model(16, 2)
+    model = config_for().build_model(3, 2)
+    with pytest.raises(ValueError, match='RGB'):
+        model(torch.randn(2, 4, 3))
 
 
-def test_build_reads_label_metadata_without_decoding_tiles(tmp_path):
-    class Dataset(torch.utils.data.Dataset):
-        targets = torch.tensor([0, 1, 0, 1])
+def test_patient_split_overlap_rejected(extractor, tmp_path):
+    folder, train, val = fixtures(tmp_path)
+    val.patients.return_value['slide6'] = train.patients()['slide0']
+    with pytest.raises(ValueError, match='share patients'):
+        sf.mil.build_fastai_learner(config_for(aggregation_level='patient'), train, val,
+                                   'label', str(folder), outdir=str(tmp_path))
 
-        def __len__(self):
-            return len(self.targets)
 
-        def __getitem__(self, index):
-            raise RuntimeError('tiles should only be loaded when fitting')
+@pytest.mark.parametrize('head', ['nnmil', 'attention_mil'])
+@pytest.mark.parametrize('loss', ['cross_entropy', 'mse'])
+def test_uq_outputs(head, loss, extractor):
+    config = config_for(head, loss=loss)
+    model = config.build_model(3, 2 if loss == 'cross_entropy' else 1).eval()
+    tiles = torch.randint(0, 256, (1, 3, 16, 16, 3), dtype=torch.uint8)
+    torch.manual_seed(9)
+    expected, std = model(tiles, uq=True, uq_softmax=loss == 'cross_entropy')
+    torch.manual_seed(9)
+    actual, attention, actual_std = config.batched_predict(model, tiles, uq=True, device='cpu')
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(actual_std, std)
 
-    loader = torch.utils.data.DataLoader(Dataset(), batch_size=2)
-    config = mil_config('nnmil', epochs=1, lr=1e-3, model_kwargs={'hidden_dim': 8})
-    learner = build_lora_learner(Extractor(), config.build_model(16, 2), loader, loader,
-                                 config=config, outdir=tmp_path / 'lazy')
-    assert isinstance(learner, Learner)
-    torch.testing.assert_close(learner.loss_func.fn.weight, torch.tensor([0.5, 0.5]))
+
+@pytest.mark.parametrize('head', ['nnmil', 'attention_mil', 'bistro.transformer'])
+def test_saved_feature_training_unchanged(head, tmp_path):
+    folder, train, val = fixtures(tmp_path)
+    for path in folder.glob('*.pt'):
+        torch.save(torch.randn(3, 16), path)
+    options = config_for(head).model_config.model_kwargs['head_kwargs']
+    config = mil_config(head, epochs=1, lr=1e-3, batch_size=2, bag_size=4,
+                        model_kwargs=options, aggregation_level='patient')
+    config.batch_size = 3
+    learner = sf.mil.train_mil(config, train, val, 'label', str(folder),
+                               outdir=str(tmp_path / 'features'), device='cpu',
+                               dataloader_kwargs={'num_workers': 0, 'persistent_workers': False})
+    assert len(learner.dls.train_ds) == 3
+    assert learner.dls.train.one_batch()[0].shape == (3, 4, 16)
+    restored, restored_config = sf.mil.load_model_weights(str(learner.path), strict=True)
+    predictions = sf.mil.predict_mil(restored.cpu(), val, 'label', str(folder), config=restored_config)
+    expected = pd.read_parquet(learner.path / 'predictions.parquet')
+    np.testing.assert_allclose(predictions.filter(like='y_pred'), expected.filter(like='y_pred'), atol=1e-6)

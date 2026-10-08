@@ -107,25 +107,15 @@ def build_learner(
         bags[train_idx],
         targets[train_idx],
         encoder=encoder,
-        dataloader_kwargs=dict(
-            num_workers=1,
-            device=device,
-            pin_memory=True,
-            **dl_kwargs
-        )
+        dataloader_kwargs={**dict(num_workers=1, device=device, pin_memory=True), **dl_kwargs}
     )
     val_dl = config.build_val_dataloader(
         bags[val_idx],
         targets[val_idx],
         encoder=encoder,
-        dataloader_kwargs=dict(
-            shufle=False,
-            num_workers=8,
-            persistent_workers=True,
-            device=device,
-            pin_memory=False,
-            **dl_kwargs
-        )
+        dataloader_kwargs={**dict(shuffle=False, num_workers=8,
+                                  persistent_workers=True, device=device, pin_memory=False),
+                           **dl_kwargs}
     )
 
     # Prepare model.

@@ -60,7 +60,7 @@ See ``examples/mil_comparison/README.md`` for benchmarking nnMIL alongside other
 Encoder adaptation
 ******************
 
-LoRA training is independent of nnMIL. The :ref:`lora_training` API accepts a caller-supplied prediction model and loss, including attention MIL, nnMIL, Bistro, and custom PyTorch heads. Saved-feature MIL training remains available through ``Project.train_mil``; updating encoder adapters requires raw tiles.
+Use ``mil_config('lora', model_kwargs={'encoder': 'hoptimus0', 'head': 'nnmil', ...})`` with ``Project.train_mil`` to adapt an encoder and train a chosen aggregation head. The registered LoRA model uses the same bag grouping, dataloaders and FastAI trainer as ordinary MIL. Its bags contain raw RGB tiles; see :ref:`lora_training` for the input format, head options and a complete example.
 
 
 Classification & Regression
