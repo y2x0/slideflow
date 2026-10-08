@@ -1,51 +1,26 @@
-# Compare MIL models on shared features
+# Optional nnMIL, LoRA and Mettle modules
 
-nnMIL and LoRA are registered MIL models. Both use `mil_config(...)` and `project.train_mil(...)`. LoRA adds encoder adaptation around a selectable aggregation head.
-
-## Source map
-
-- [nnMIL model and checkpoint loader](../../slideflow/mil/models/nnmil.py)
-- [MIL registration](../../slideflow/mil/__init__.py) and [configuration](../../slideflow/mil/_params.py)
-- [LoRA model](../../slideflow/mil/models/lora.py)
-- [Encoder forward utility](../../slideflow/model/lora.py)
-- [Shared FastAI learner factory and trainer](../../slideflow/mil/train/_fastai.py)
-- [Adapter insertion and loading](../../slideflow/model/extractors/_lora.py)
-- [H-Optimus extractor](../../slideflow/model/extractors/hoptimus0.py)
-- [Mettle extractor](../../slideflow/model/extractors/mettle.py)
-- [Training tests with several heads](../../slideflow/test/lora_train_test.py)
-
-## Compare saved-feature models
-
-Prepare `train` and `val` datasets with a categorical `label` annotation and fixed, disjoint patient groups. Extract feature bags with the same encoder checkpoint, tile resolution, and sampling procedure. Use those same bags and splits for each architecture:
+These additions are opt-in. Existing Slideflow files, README, configuration, models and trainers are unchanged from the pre-module baseline. No existing functions or registry entries are replaced at import time.
 
 ```python
+import slideflow as sf
+import slideflow.mil.extensions
 from slideflow.mil import mil_config
-
-for architecture in ['nnmil', 'attention_mil', 'bistro.transformer']:
-    config = mil_config(architecture, lr=2e-4, epochs=40, bag_size=512)
-    project.train_mil(
-        config=config, outcomes='label',
-        train_dataset=train, val_dataset=val,
-        bags='/path/to/matched/features',
-        outdir=f'runs/{architecture}',
-    )
 ```
 
-CLAM models are available through the optional `slideflow-gpl` package. Add `clam_sb` to a comparison after installing it. Configure model-specific arguments separately; architectures need not share the same hyperparameters. Select hyperparameters within training folds and report held-out results using the same patient grouping and metrics.
+The import registers two new MIL names (`nnmil`, `lora`) and two new extractor names (`mettle`, `hoptimus0_lora`). Standard `hoptimus0` is unchanged; `hoptimus0_lora` adds local checkpoint construction and adapter loading. Import the extension before reconstructing saved extension models as well.
 
-## Train adapters with a chosen model
+## Train LoRA with a selected head
 
 ```python
-from slideflow.mil import mil_config
-
 config = mil_config(
     'lora',
     aggregation_level='patient',
     lr=5e-5, epochs=8, batch_size=2, bag_size=32,
     model_kwargs={
-        'encoder': 'hoptimus0',
+        'encoder': 'hoptimus0_lora',
         'encoder_kwargs': {'weights': '/path/to/base/pytorch_model.bin'},
-        'head': 'nnmil',  # or 'attention_mil', 'bistro.transformer'
+        'head': 'nnmil',
         'head_kwargs': {'hidden_dim': 256},
         'first_block': 32, 'rank': 8, 'alpha': 16,
         'tile_batch_size': 16,
@@ -57,19 +32,54 @@ learner = project.train_mil(
     bags='/path/to/rgb_tile_bags',
     outdir='runs/adaptation',
 )
-
 ```
 
-For AMIL, use `head='attention_mil'` and `head_kwargs={'z_dim': 256}`. For Bistro, use `head='bistro.transformer'` and its own constructor arguments. The encoder can also be `mettle` with a local checkpoint. Compatible encoders must expose a timm ViT with packed Q/K/V projections and the Slideflow transform/feature-width interface. Multi-input heads and coordinate-dependent heads need a separate input contract.
+Use `head='attention_mil'` with `head_kwargs={'z_dim': 256}` for AMIL, or `head='bistro.transformer'` with its constructor arguments. Mettle uses `encoder='mettle'` and a local checkpoint. Heads operate on features from the encoder. Length-aware heads receive bag lengths; other heads receive individually trimmed bags. Multimodal and coordinate-dependent heads require a different input contract.
 
-Each bag is a `.pt` tensor named for its slide, containing **uint8 RGB tiles shaped `(tiles, height, width, 3)`**, before normalization. Pack existing decoded/cached tiles with `torch.save(tiles, 'slide_name.pt')`; LoRA cannot train the encoder from saved embeddings. This interface reads tensor bags; it does not directly stream WSI files or TFRecords. All slides in a bag directory must use the same tile resolution and channel layout. Keep coordinates in matching tile order if producing slide heatmaps.
+The normal `train_mil` code resolves annotation labels and slide/patient grouping, then the normal FastAI builder calls the registered model configuration's dataloader hook and `config.build_model`. The added configuration supplies an image-aware bag dataset only for the new models. The existing trainer still controls losses, class weighting, learning rate, epochs, scheduling, checkpoint selection and result exports. There is no separate LoRA trainer or replacement training function. Choosing a head does not inherit that head's model-configuration sampler settings.
 
-The ordinary `train_mil` path resolves annotations and slide names, groups bags by slide or patient, builds the usual dataloaders, and constructs `LoRA` through `config.build_model`. Loss, class weighting, sampling, batch size, epochs, learning rate, schedule, validation and checkpoint monitor remain standard trainer settings. The head receives encoded features; length-aware heads mask padding, and other heads receive individually trimmed bags. Changing `head` does not choose a separate trainer or sampling policy. Head-specific config options such as nnMIL's `balanced_batches` are not inherited by the LoRA wrapper.
+Each bag is a slide-named `.pt` uint8 RGB tensor shaped `(tiles, height, width, 3)`, before normalization. Existing decoded tiles can be packed with `torch.save(tiles, 'slide_name.pt')`. Saved embeddings cannot train encoder adapters. This interface does not stream WSI/TFRecord files; the added dataset loads complete slide tensor files before sampling. Use small bags/batches. `tile_batch_size` chunks encoder forwards and `checkpoint_blocks=True` reduces stored activations. Set `adapt=False` in `model_kwargs` for a frozen-encoder control with the same data, head and trainer. Keep patient-disjoint splits fixed across comparisons.
 
-Start with small raw-tile bags and batches because encoder training uses more memory than saved-feature training. `tile_batch_size` chunks the encoder forward pass; `checkpoint_blocks=True` reduces activations stored for backward. The shared bag loader still reads complete slide tensor files before sampling. Set `adapt=False` inside `model_kwargs` for a frozen-encoder control using exactly the same pipeline and head. Keep patient splits, preprocessing, seeds, sampler, learning rate and schedule fixed for that comparison.
+`num_workers=0` may be passed to `mil_config` for local debugging of the added models; omitted, the extension retains the trainer's worker counts. Sampling and batching otherwise follow the usual trainer settings. LoRA uses uniform shuffled batches; standalone nnMIL optionally uses the added balanced sampler.
 
-Runs save the ordinary `history.csv`, `models/best_valid.pth`, `mil_params.json`, `slide_manifest.csv`, `predictions.parquet` and metric plots. The checkpoint contains the encoder, adapters and head. `sf.mil.load_model_weights(run_directory)` reconstructs the full model for raw-tile predictions; retain the base checkpoint at its configured path. Patient-level metrics and predictions retain patient identifiers; patient attention is not exported as slide heatmaps.
+## Train nnMIL on existing feature bags
 
-For customization, use `sf.mil.build_fastai_learner` and standard FastAI methods or callbacks. For adapter-only deployment, call `learner.model.export_adapters('adapters.pt')` and `torch.save(learner.model.head.state_dict(), 'head.pt')` after the best checkpoint has been restored. Load adapters into the matching base extractor with the same first-block, rank and alpha settings. There is no separate `train_lora` or LoRA trainer.
+```python
+config = mil_config('nnmil', lr=2e-4, epochs=40, bag_size=512,
+                    balanced_batches=True, model_kwargs={'hidden_dim': 256})
+learner = project.train_mil(
+    config=config, outcomes='label',
+    train_dataset=train, val_dataset=val,
+    bags='/path/to/features', outdir='runs/nnmil',
+)
+```
 
-Regression uses `loss='mse'` in `mil_config`. Other objectives follow the same custom MIL configuration mechanism as ordinary MIL. Adaptation must stay inside each training fold. This example is a software workflow, not a measured performance comparison.
+Existing AMIL, TransMIL, Bistro and extractor registrations retain their original behavior. The added nnMIL configuration's sampling and data handling do not change those models.
+
+## Results and limits
+
+Runs use the unchanged trainer's history, manifests, MIL parameters, predictions, best checkpoint and metrics. `sf.mil.load_model_weights(run_directory)` restores the standard best checkpoint after the extension import. LoRA checkpoints contain the full encoder and head; keep the configured base checkpoint available when reconstructing the model.
+
+The restored Slideflow code cannot format patient-level regression targets correctly during evaluation. The added configurations reject patient-level regression explicitly. Slide-level regression and slide/patient classification are supported. No upstream regression fix or split-checking behavior is installed. The caller must provide patient-disjoint train/validation datasets, as for ordinary MIL.
+
+Patient-level attention from the added models is suppressed because the unchanged exporter assumes slide names; do not request patient attention heatmaps. Slide attention requires coordinates matching the tile order. These limits are retained rather than modifying shared Slideflow code.
+
+After best-model selection, optional deployment exports are:
+
+```python
+import torch
+learner.model.export_adapters('adapters.pt')
+torch.save(learner.model.head.state_dict(), 'head.pt')
+```
+
+Reload adapters with the same base encoder, first block, rank and alpha. The additive `hoptimus0_lora` and `mettle` extractors accept those adapter parameters. For custom fitting, use the ordinary `sf.mil.build_fastai_learner` and FastAI callbacks. This is a software integration, not a measured cohort performance result.
+
+## Added source files
+
+- `slideflow/mil/extensions.py`: opt-in registration only.
+- `slideflow/mil/_extension_config.py`: configuration hooks scoped to the added models.
+- `slideflow/mil/_extension_data.py`: instance-shaped bags and optional nnMIL sampling.
+- `slideflow/mil/models/{nnmil,lora}.py`: model classes.
+- `slideflow/model/lora.py` and `extractors/_lora.py`: encoder forward and adapter utilities.
+- `slideflow/model/extractors/{mettle,hoptimus0_lora}.py`: additional extractors.
+- New tests in `slideflow/test/`: training, checkpoint, padding, extractor and import-isolation checks.

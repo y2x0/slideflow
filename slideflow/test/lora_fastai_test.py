@@ -1,5 +1,7 @@
 """Exercise raw-tile LoRA through the ordinary MIL training pipeline."""
 
+import slideflow.mil.extensions
+
 import copy
 import json
 from pathlib import Path
@@ -12,7 +14,7 @@ import torch
 
 import slideflow as sf
 from slideflow.mil import mil_config
-from slideflow.mil.data import BagDataset
+from slideflow.mil._extension_data import InstanceBagDataset as BagDataset
 from slideflow.mil.train import _fastai
 from slideflow.test.lora_train_test import Extractor
 
@@ -58,7 +60,7 @@ def config_for(head='nnmil', **kwargs):
         {'z_dim': 8, 'dropout_p': 0} if head == 'attention_mil' else
         {'dim': 16, 'depth': 1, 'heads': 2, 'dim_head': 8, 'mlp_dim': 16})
     return mil_config('lora', epochs=2, lr=1e-3, batch_size=2,
-                      bag_size=4, drop_last=False,
+                      bag_size=4, drop_last=False, num_workers=0,
                       model_kwargs=dict(encoder='tiny', head=head, head_kwargs=options,
                                         first_block=1, rank=2, alpha=4, dropout=0,
                                         tile_batch_size=2), **kwargs)
@@ -77,8 +79,7 @@ def test_train_mil_roundtrip(head, level, extractor, tmp_path):
             patch.object(_fastai, 'train', wraps=_fastai.train) as fit, \
             patch.object(config, 'build_model', wraps=config.build_model) as model_build:
         learner = sf.mil.train_mil(config, train, val, 'label', str(folder),
-                                   outdir=str(tmp_path / 'runs'), device='cpu',
-                                   dataloader_kwargs={'num_workers': 0, 'persistent_workers': False})
+                                   outdir=str(tmp_path / 'runs'), device='cpu')
     assert build.call_count == fit.call_count == model_build.call_count == 1
     assert len(learner.dls.train_ds) == (6 if level == 'slide' else 3)
     assert len(learner.dls.valid_ds) == (4 if level == 'slide' else 2)
@@ -128,14 +129,13 @@ def test_patient_bag_loading_preserves_all_slides(tmp_path):
     assert sorted(tiles[:, 0, 0, 0].tolist()) == [0, 0, 1, 1, 2, 2, 2]
 
 
-@pytest.mark.parametrize('level', ['slide', 'patient'])
+@pytest.mark.parametrize('level', ['slide'])
 def test_regression_and_frozen_control(level, extractor, tmp_path):
     folder, train, val = fixtures(tmp_path)
     config = config_for(loss='mse', fit_one_cycle=False, aggregation_level=level)
     config.model_config.model_kwargs['adapt'] = False
     learner = sf.mil.train_mil(config, train, val, 'score', str(folder),
-                               outdir=str(tmp_path / 'regression'), device='cpu',
-                               dataloader_kwargs={'num_workers': 0, 'persistent_workers': False})
+                               outdir=str(tmp_path / 'regression'), device='cpu')
     for name, value in learner.model.encoder.state_dict().items():
         torch.testing.assert_close(value, extractor.model.state_dict()[name], atol=0, rtol=0)
     history = pd.read_csv(learner.path / 'history.csv')
@@ -152,12 +152,9 @@ def test_invalid_feature_input(extractor):
         model(torch.randn(2, 4, 3))
 
 
-def test_patient_split_overlap_rejected(extractor, tmp_path):
-    folder, train, val = fixtures(tmp_path)
-    val.patients.return_value['slide6'] = train.patients()['slide0']
-    with pytest.raises(ValueError, match='share patients'):
-        sf.mil.build_fastai_learner(config_for(aggregation_level='patient'), train, val,
-                                   'label', str(folder), outdir=str(tmp_path))
+def test_patient_regression_reports_native_limit():
+    with pytest.raises(ValueError, match='unchanged Slideflow'):
+        config_for(loss='mse', aggregation_level='patient')
 
 
 @pytest.mark.parametrize('head', ['nnmil', 'attention_mil'])
@@ -172,23 +169,3 @@ def test_uq_outputs(head, loss, extractor):
     actual, attention, actual_std = config.batched_predict(model, tiles, uq=True, device='cpu')
     torch.testing.assert_close(actual, expected)
     torch.testing.assert_close(actual_std, std)
-
-
-@pytest.mark.parametrize('head', ['nnmil', 'attention_mil', 'bistro.transformer'])
-def test_saved_feature_training_unchanged(head, tmp_path):
-    folder, train, val = fixtures(tmp_path)
-    for path in folder.glob('*.pt'):
-        torch.save(torch.randn(3, 16), path)
-    options = config_for(head).model_config.model_kwargs['head_kwargs']
-    config = mil_config(head, epochs=1, lr=1e-3, batch_size=2, bag_size=4,
-                        model_kwargs=options, aggregation_level='patient')
-    config.batch_size = 3
-    learner = sf.mil.train_mil(config, train, val, 'label', str(folder),
-                               outdir=str(tmp_path / 'features'), device='cpu',
-                               dataloader_kwargs={'num_workers': 0, 'persistent_workers': False})
-    assert len(learner.dls.train_ds) == 3
-    assert learner.dls.train.one_batch()[0].shape == (3, 4, 16)
-    restored, restored_config = sf.mil.load_model_weights(str(learner.path), strict=True)
-    predictions = sf.mil.predict_mil(restored.cpu(), val, 'label', str(folder), config=restored_config)
-    expected = pd.read_parquet(learner.path / 'predictions.parquet')
-    np.testing.assert_allclose(predictions.filter(like='y_pred'), expected.filter(like='y_pred'), atol=1e-6)

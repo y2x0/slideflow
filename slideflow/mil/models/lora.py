@@ -95,7 +95,9 @@ class LoRA(nn.Module):
         return self.head(features, **kwargs)
 
     def forward(self, bags, lens=None, *, return_attention=False, uq=False,
-                uq_softmax=True):
+                uq_softmax=None):
+        if uq_softmax is None:
+            uq_softmax = getattr(self, 'uq_apply_softmax', True)
         features, lens = self._features(bags, lens)
         params = inspect.signature(self.head.forward).parameters
         kwargs = {}

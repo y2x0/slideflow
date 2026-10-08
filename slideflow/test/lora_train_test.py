@@ -1,5 +1,7 @@
 """Check adapter insertion and checkpoint compatibility."""
 
+import slideflow.mil.extensions
+
 import copy
 import tempfile
 from pathlib import Path
@@ -8,7 +10,7 @@ import pytest
 import timm
 import torch
 
-from slideflow.mil.models import NNMIL
+from slideflow.mil.models.nnmil import NNMIL
 from slideflow.model.lora import (
     adapter_state_dict, apply_lora, encode_tiles, init_lora,
 )

@@ -109,7 +109,7 @@ class NNMIL(nn.Module):
         *,
         return_attention: bool = False,
         uq: bool = False,
-        uq_softmax: bool = True
+        uq_softmax: bool = None
     ):
         """Predict from a batch of bags.
 
@@ -137,6 +137,8 @@ class NNMIL(nn.Module):
             attention.append(att)
         logits = torch.stack(logits)
 
+        if uq_softmax is None:
+            uq_softmax = getattr(self, 'uq_apply_softmax', True)
         if uq:
             preds = torch.softmax(logits, dim=-1) if uq_softmax else logits
             scores = (preds.mean(0), preds.std(0, unbiased=False))

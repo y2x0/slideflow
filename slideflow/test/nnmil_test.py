@@ -6,8 +6,9 @@ import numpy as np
 try:
     import torch
     import slideflow.mil
-    from slideflow.mil.models import NNMIL
-    from slideflow.mil.data import StratifiedShuffle
+    import slideflow.mil.extensions
+    from slideflow.mil.models.nnmil import NNMIL
+    from slideflow.mil._extension_data import StratifiedShuffle
     from slideflow.mil.train import _fastai
     has_torch = True
 except ImportError:
@@ -25,7 +26,7 @@ class TestNNMIL(unittest.TestCase):
     def test_registered(self):
         self.assertIn('nnmil', slideflow.mil.list_models())
         config = slideflow.mil.mil_config('nnmil')
-        self.assertIsInstance(config.model_config, slideflow.mil.NNMILModelConfig)
+        self.assertIsInstance(config.model_config, slideflow.mil.extensions.NNMILModelConfig)
         self.assertTrue(config.model_config.use_lens)
 
     def test_eval_subsets(self):

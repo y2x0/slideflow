@@ -1,5 +1,7 @@
 """Check nnMIL registration, checkpoint inference and extractor reconstruction."""
 
+import slideflow.mil.extensions
+
 import copy
 import json
 import tempfile
@@ -13,8 +15,8 @@ import slideflow as sf
 import slideflow.mil
 from timm.models.vision_transformer import VisionTransformer
 
-from slideflow.mil.models import NNMIL
-from slideflow.mil.data import StratifiedShuffle
+from slideflow.mil.models.nnmil import NNMIL
+from slideflow.mil._extension_data import StratifiedShuffle
 from slideflow.model.extractors._factory import build_extractor_from_cfg
 from slideflow.model.extractors._lora import adapter_state_dict, apply_lora, init_lora
 
@@ -87,7 +89,7 @@ class TestNNMILIntegration(unittest.TestCase):
             path = Path(folder)
             adapters = path/'adapters.pt'
             torch.save(adapter_state_dict(adapted), adapters)
-            for name in ['hoptimus0', 'mettle']:
+            for name in ['hoptimus0_lora', 'mettle']:
                 weights = path/f'{name}.pt'
                 state = base.state_dict()
                 if name == 'mettle':
