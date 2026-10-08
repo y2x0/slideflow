@@ -17,16 +17,6 @@ training runs.
 
 ### Added
 
-- Query/value LoRA loading for H-Optimus-0 and the local-checkpoint Mettle extractor, with adapter validation before changing the encoder.
-- Registered raw-tile ``lora`` MIL model with a selectable aggregation head, using the normal ``train_mil`` bag grouping, dataloaders, model construction, training and evaluation. Replaces the separate LoRA trainer/API.
-
-- **nnMIL model** — new `nnmil` MIL architecture (`mil_config('nnmil')`):
-  gated attention over random feature-dimension subsets during training,
-  averaged over fixed overlapping subsets at inference, with optional
-  subset-spread uncertainty (`uq=True`). Its config builds training
-  batches with the training set's outcome mix (`balanced_batches`,
-  quantile strata for regression). Reference: Luo et al., *Nature
-  Biomedical Engineering* (2026).
 - **H-optimus-0 feature extractor** — new `hoptimus0` extractor
   (1536-dim ViT, 224 px tiles, Apache-2.0 license; weights from
   https://huggingface.co/bioptimus/H-optimus-0).

@@ -3,7 +3,7 @@
 Multiple-Instance Learning (MIL)
 ================================
 
-In addition to standard tile-based neural networks, Slideflow also supports training multiple-instance learning (MIL) models. Several architectures are available, including `attention-based MIL <https://github.com/AMLab-Amsterdam/AttentionDeepMIL>`_ (``"Attention_MIL"``), `CLAM <https://github.com/mahmoodlab/CLAM>`_ (``"CLAM_SB",`` ``"CLAM_MB"``, ``"MIL_fc"``, ``"MIL_fc_mc"``), `TransMIL <https://github.com/szc19990412/TransMIL>`_ (``"TransMIL"``), `nnMIL <https://arxiv.org/abs/2511.14907>`_ (``"nnmil"``), and `HistoBistro Transformer <https://github.com/peng-lab/HistoBistro>`_ (``"bistro.transformer"``). Custom architectures can also be trained. MIL training requires PyTorch.
+In addition to standard tile-based neural networks, Slideflow also supports training multiple-instance learning (MIL) models. Several architectures are available, including `attention-based MIL <https://github.com/AMLab-Amsterdam/AttentionDeepMIL>`_ (``"Attention_MIL"``), `CLAM <https://github.com/mahmoodlab/CLAM>`_ (``"CLAM_SB",`` ``"CLAM_MB"``, ``"MIL_fc"``, ``"MIL_fc_mc"``), `TransMIL <https://github.com/szc19990412/TransMIL>`_ (``"TransMIL"``), and `HistoBistro Transformer <https://github.com/peng-lab/HistoBistro>`_ (``"bistro.transformer"``). Custom architectures can also be trained. MIL training requires PyTorch.
 
 Skip to :ref:`tutorial8` for a complete example of MIL training.
 
@@ -31,36 +31,13 @@ The first argument to this function is the model architecture (which can be a na
 
     config = mil_config('attention_mil', lr=1e-3)
 
-Available models out-of-the-box include `attention-based MIL <https://github.com/AMLab-Amsterdam/AttentionDeepMIL>`_ (``"Attention_MIL"``), `transformer MIL <https://github.com/szc19990412/TransMIL>`_ (``"TransMIL"``), `nnMIL <https://arxiv.org/abs/2511.14907>`_ (``"nnmil"``), and `HistoBistro Transformer <https://github.com/peng-lab/HistoBistro>`_ (``"bistro.transformer"``). `CLAM <https://github.com/mahmoodlab/CLAM>`_ (``"CLAM_SB",`` ``"CLAM_MB"``, ``"MIL_fc"``, ``"MIL_fc_mc"``) models are available through ``slideflow-gpl``:
+Available models out-of-the-box include `attention-based MIL <https://github.com/AMLab-Amsterdam/AttentionDeepMIL>`_ (``"Attention_MIL"``), `transformer MIL <https://github.com/szc19990412/TransMIL>`_ (``"TransMIL"``), and `HistoBistro Transformer <https://github.com/peng-lab/HistoBistro>`_ (``"bistro.transformer"``). `CLAM <https://github.com/mahmoodlab/CLAM>`_ (``"CLAM_SB",`` ``"CLAM_MB"``, ``"MIL_fc"``, ``"MIL_fc_mc"``) models are available through ``slideflow-gpl``:
 
 .. code-block:: bash
 
     pip install slideflow-gpl
 
 Custom MIL models can also be trained with this API, as discussed :ref:`below <custom_mil>`.
-
-nnMIL
-*****
-
-``"nnmil"`` is a gated attention model whose attention network sees a random subset of the feature dimensions at each training step, and averages its predictions over a fixed set of overlapping feature subsets at inference. By default, training batches approximately preserve the outcome mix of the training set (``balanced_batches=True``); for regression, quantile bins of the outcome (``n_strata``) are used. Patch sampling comes from ``bag_size``, which draws a new random subset of tiles from each bag every epoch. Model options are passed through ``model_kwargs``:
-
-.. code-block:: python
-
-    config = mil_config(
-        'nnmil',
-        lr=3e-4,
-        bag_size=512,
-        model_kwargs=dict(hidden_dim=256, dropout_p=0.25)
-    )
-
-With ``uq=True`` at inference, the model reports the spread of its predictions across the feature subsets as an uncertainty estimate.
-
-See ``examples/mil_comparison/README.md`` for benchmarking nnMIL alongside other MIL architectures on the same feature bags. Checkpoints can be loaded with ``NNMIL.from_checkpoint(path)``.
-
-Encoder adaptation
-******************
-
-Use ``mil_config('lora', model_kwargs={'encoder': 'hoptimus0', 'head': 'nnmil', ...})`` with ``Project.train_mil`` to adapt an encoder and train a chosen aggregation head. The registered LoRA model uses the same bag grouping, dataloaders and FastAI trainer as ordinary MIL. Its bags contain raw RGB tiles; see :ref:`lora_training` for the input format, head options and a complete example.
 
 
 Classification & Regression

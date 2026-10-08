@@ -178,7 +178,7 @@ def predict_mil(
 
         # Create prediction dataframe.
         patients = [slide_to_patient[path_to_name(b[0])] for b in bags]
-        df_dict = dict(patient=patients)
+        df_dict = dict(patient=patients, y_true=y_true)
 
     else:
         # Ensure slide names are sorted according to the bags.
@@ -188,12 +188,12 @@ def predict_mil(
         # Create prediction dataframe.
         df_dict = dict(slide=slides)
 
-    # Handle continuous outcomes for either aggregation level.
-    if len(y_true.shape) > 1:
-        for i in range(y_true.shape[-1]):
-            df_dict[f'y_true{i}'] = y_true[:, i]
-    else:
-        df_dict['y_true'] = y_true
+        # Handle continous outcomes.
+        if len(y_true.shape) > 1:
+            for i in range(y_true.shape[-1]):
+                df_dict[f'y_true{i}'] = y_true[:, i]
+        else:
+            df_dict['y_true'] = y_true
 
     # Inference.
     model.eval()
@@ -536,9 +536,9 @@ def predict_from_bags(
     for bag in bags:
         if utils._is_list_of_paths(bag):
             # If bags are passed as a list of paths, load them individually.
-            loaded = torch.cat([utils._load_bag(b, dtype=getattr(model, 'input_dtype', None)).to(device) for b in bag], dim=0)
+            loaded = torch.cat([utils._load_bag(b).to(device) for b in bag], dim=0)
         else:
-            loaded = utils._load_bag(bag, dtype=getattr(model, 'input_dtype', None)).to(device)
+            loaded = utils._load_bag(bag).to(device)
         loaded = torch.unsqueeze(loaded, dim=0)
 
         with torch.inference_mode():
@@ -717,11 +717,6 @@ def run_inference(
     else:
         kw = forward_kwargs
 
-    uq_probabilities = False
-    if uq and getattr(model, 'uq_uses_softmax', False):
-        kw.setdefault('uq_softmax', bool(apply_softmax))
-        uq_probabilities = kw['uq_softmax']
-
     # Check if the model can return attention during inference.
     # If so, this saves us a forward pass through the model.
     if attention and 'return_attention' in inspect.signature(model.forward).parameters:
@@ -746,7 +741,7 @@ def run_inference(
         if len(y_att.shape) == 2:
             y_att = torch.moveaxis(y_att, -1, 0)
 
-    if apply_softmax and not uq_probabilities:
+    if apply_softmax:
         y_pred = torch.nn.functional.softmax(y_pred, dim=1)
     return y_pred, y_att, y_uncertainty
 

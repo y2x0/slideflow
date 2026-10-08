@@ -96,8 +96,7 @@ def load_model_weights(
     if isdir(weights):
         weights = _find_weights_path(weights, mil_params)
     log.info(f"Loading model weights from [green]{weights}[/]")
-    state = torch.load(weights, map_location='cpu', weights_only=True)
-    model.load_state_dict(state['model'] if 'model' in state else state)
+    model.load_state_dict(torch.load(weights, map_location=get_device()))
 
     # Prepare device.
     if hasattr(model, 'relocate'):
@@ -378,7 +377,7 @@ def rename_df_cols(df, outcomes, categorical, inplace=False):
 def _rename_categorical_df_cols(df, outcomes, inplace=False):
     outcome_name = outcomes if isinstance(outcomes, str) else '-'.join(outcomes)
     return df.rename(
-        columns={c: f"{outcome_name}-{c}" for c in df.columns if c not in ('slide', 'patient')},
+        columns={c: f"{outcome_name}-{c}" for c in df.columns if c != 'slide'},
         inplace=inplace
     )
 
@@ -394,9 +393,7 @@ def _rename_continuous_df_cols(df, outcomes, inplace=False):
 
 def _find_weights_path(path: str, mil_params: Dict) -> str:
     """Determine location of model weights from a given model directory."""
-    if mil_params.get('training_input') == 'raw_tiles':
-        weights = join(path, mil_params.get('weights', 'head.pt'))
-    elif exists(join(path, 'models', 'best_valid.pth')):
+    if exists(join(path, 'models', 'best_valid.pth')):
         weights = join(path, 'models', 'best_valid.pth')
     elif exists(join(path, 'results', 's_0_checkpoint.pt')):
         weights = join(path, 'results', 's_0_checkpoint.pt')
@@ -416,22 +413,20 @@ def _find_weights_path(path: str, mil_params: Dict) -> str:
 
 def _load_bag(
     bag: Union[str, np.ndarray, "torch.Tensor", List[str]],
-    device='cpu',
-    dtype=None
+    device='cpu'
 ) -> "torch.Tensor":
     """Load bag from file or convert to torch.Tensor."""
     import torch
 
-    dtype = torch.float32 if dtype is None else dtype
     if _is_list_of_paths(bag):
         # If bags are passed as a list of paths, load them individually.
-        return torch.cat([_load_bag(b, device=device, dtype=dtype) for b in bag], dim=0)
+        return torch.cat([_load_bag(b, device=device) for b in bag], dim=0)
     if isinstance(bag, str):
-        return torch.load(bag, map_location=device, weights_only=True).to(dtype)
+        return torch.load(bag, map_location=device).to(torch.float32)
     elif isinstance(bag, np.ndarray):
-        return torch.from_numpy(bag).to(dtype=dtype, device=device)
+        return torch.from_numpy(bag).to(torch.float32).to(device)
     elif isinstance(bag, torch.Tensor):
-        return bag.to(dtype=dtype, device=device)
+        return bag.to(device)
     else:
         raise ValueError(
             "Unrecognized bag type '{}'".format(type(bag))

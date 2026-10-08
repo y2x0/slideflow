@@ -159,12 +159,6 @@ def build_fastai_learner(
         slide_to_patient = { **train_dataset.patients(),
                              **val_dataset.patients() }
 
-        if train_dataset is not val_dataset:
-            overlap = ({slide_to_patient[s] for s in train_slides}
-                       & {slide_to_patient[s] for s in val_slides})
-            if overlap:
-                raise ValueError('Training and validation datasets share patients')
-
         # Aggregate feature bags across patients.
         n_slide_bags = len(bags)
         bags, targets, train_idx, val_idx = utils.aggregate_trainval_bags_by_patient(
@@ -346,7 +340,6 @@ def _train_mil(
     attention_heatmaps: bool = False,
     uq: bool = False,
     device: Optional[str] = None,
-    dataloader_kwargs: Optional[dict] = None,
     **heatmap_kwargs
 ) -> "Learner":
     """Train an MIL model using FastAI.
@@ -386,9 +379,6 @@ def _train_mil(
     """
     from . import _fastai
 
-    if config.aggregation_level == 'patient' and attention_heatmaps:
-        raise ValueError('Patient-level attention cannot be mapped to individual slide heatmaps')
-
     # Prepare validation bags.
     if isinstance(bags, str) or (isinstance(bags, list) and isdir(bags[0])):
         val_bags = val_dataset.get_bags(bags)
@@ -404,8 +394,7 @@ def _train_mil(
         bags=bags,
         outdir=outdir,
         device=device,
-        return_shape=True,
-        **(dataloader_kwargs or {})
+        return_shape=True
     )
 
     # Save MIL settings.
@@ -440,11 +429,7 @@ def _train_mil(
 
     # Print classification metrics, including per-category accuracy
     utils.rename_df_cols(df, outcomes, categorical=config.is_classification(), inplace=True)
-    config.run_metrics(df, level=config.aggregation_level, outdir=outdir)
-
-    if config.aggregation_level == 'patient':
-        # patient attention spans multiple slides and has no single-slide index
-        attention = None
+    config.run_metrics(df, level='slide', outdir=outdir)
 
     # Export attention to numpy arrays
     if attention and outdir:

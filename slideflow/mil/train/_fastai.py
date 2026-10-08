@@ -16,7 +16,7 @@ from .._params import TrainerConfig
 
 # -----------------------------------------------------------------------------
 
-def train(learner, config, callbacks=None, lr=None):
+def train(learner, config, callbacks=None):
     """Train an attention-based multi-instance learning model with FastAI.
 
     Args:
@@ -25,7 +25,6 @@ def train(learner, config, callbacks=None, lr=None):
 
     Keyword args:
         callbacks (list(fastai.Callback)): FastAI callbacks. Defaults to None.
-        lr (float or list): Optional learning rate override, including parameter groups.
     """
     cbs = [
         SaveModelCallback(fname=f"best_valid", monitor=config.save_monitor),
@@ -34,17 +33,17 @@ def train(learner, config, callbacks=None, lr=None):
     if callbacks:
         cbs += callbacks
     if config.fit_one_cycle:
-        if lr is None and config.lr is None:
+        if config.lr is None:
             lr = learner.lr_find().valley
             log.info(f"Using auto-detected learning rate: {lr}")
-        elif lr is None:
+        else:
             lr = config.lr
         learner.fit_one_cycle(n_epoch=config.epochs, lr_max=lr, cbs=cbs)
     else:
-        if lr is None and config.lr is None:
+        if config.lr is None:
             lr = learner.lr_find().valley
             log.info(f"Using auto-detected learning rate: {lr}")
-        elif lr is None:
+        else:
             lr = config.lr
         learner.fit(n_epoch=config.epochs, lr=lr, wd=config.wd, cbs=cbs)
     return learner
@@ -107,15 +106,25 @@ def build_learner(
         bags[train_idx],
         targets[train_idx],
         encoder=encoder,
-        dataloader_kwargs={**dict(num_workers=1, device=device, pin_memory=True), **dl_kwargs}
+        dataloader_kwargs=dict(
+            num_workers=1,
+            device=device,
+            pin_memory=True,
+            **dl_kwargs
+        )
     )
     val_dl = config.build_val_dataloader(
         bags[val_idx],
         targets[val_idx],
         encoder=encoder,
-        dataloader_kwargs={**dict(shuffle=False, num_workers=8,
-                                  persistent_workers=True, device=device, pin_memory=False),
-                           **dl_kwargs}
+        dataloader_kwargs=dict(
+            shufle=False,
+            num_workers=8,
+            persistent_workers=True,
+            device=device,
+            pin_memory=False,
+            **dl_kwargs
+        )
     )
 
     # Prepare model.
@@ -146,12 +155,6 @@ def build_learner(
 
     # Create learning and fit.
     dls = DataLoaders(train_dl, val_dl)
-    learner = build_learner_from_dls(config, dls, model, loss_func=loss_func, path=outdir)
+    learner = Learner(dls, model, loss_func=loss_func, metrics=config.get_metrics(), path=outdir)
 
     return learner, (n_in, n_out)
-
-
-def build_learner_from_dls(config, dls, model, *, loss_func, metrics=None, **kwargs):
-    """Build the shared FastAI learner from prepared data and a prediction model."""
-    return Learner(dls, model, loss_func=loss_func,
-                   metrics=config.get_metrics() if metrics is None else metrics, **kwargs)

@@ -19,10 +19,6 @@ Designed for both medical researchers and AI enthusiasts, the goal of Slideflow 
 
 
 
-## LoRA and nnMIL in this branch
-
-The [training call and source map](examples/mil_comparison/README.md#train-adapters-with-a-chosen-model) show `mil_config('lora', model_kwargs={'encoder': ..., 'head': 'nnmil'})` with the normal `project.train_mil(...)` API. The [LoRA model class](slideflow/mil/models/lora.py) supports nnMIL, AMIL and other compatible heads while preserving the existing bag grouping, dataloaders and FastAI trainer. [Full API details](docs-source/source/model.rst#lora-training).
-
 ## 🚀 Features
 - Easy-to-use, highly customizable training pipelines
 - Robust **[slide processing](https://slideflow.dev/slide_processing) and [stain normalization](https://slideflow.dev/norm)** toolkit

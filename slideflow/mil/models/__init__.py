@@ -2,5 +2,3 @@
 
 from .att_mil import Attention_MIL, MultiModal_Attention_MIL, UQ_MultiModal_Attention_MIL
 from .transmil import TransMIL
-from .nnmil import NNMIL
-from .lora import LoRA

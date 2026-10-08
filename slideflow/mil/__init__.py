@@ -20,8 +20,7 @@ from .eval import (
 from ._params import (
     mil_config,
     TrainerConfig,
-    MILModelConfig,
-    NNMILModelConfig
+    MILModelConfig
 )
 from .utils import load_model_weights, load_mil_config
 from ._registry import (
@@ -53,17 +52,7 @@ def transmil():
     from .models import TransMIL
     return TransMIL
 
-@register_model('nnmil', config=NNMILModelConfig)
-def nnmil():
-    from .models import NNMIL
-    return NNMIL
-
 @register_model('bistro.transformer')
 def bistro_transformer():
     from .models.bistro import Transformer
     return Transformer
-
-@register_model('lora')
-def lora():
-    from .models import LoRA
-    return LoRA
