@@ -6,7 +6,7 @@ import torch
 from torch import nn
 
 from slideflow.model.lora import encode_tiles
-from slideflow.model.extractors._lora import adapter_state_dict, init_lora
+from slideflow.model.extractors._lora import adapter_state_dict, apply_lora, init_lora
 
 
 class LoRA(nn.Module):
@@ -18,7 +18,8 @@ class LoRA(nn.Module):
     def __init__(self, n_in, n_out, *, encoder, head='nnmil', encoder_kwargs=None,
                  head_kwargs=None, first_block=None, rank=8, alpha=16,
                  dropout=0.05, adapt=True, tile_batch_size=32,
-                 checkpoint_blocks=True):
+                 checkpoint_blocks=True, adapters=None, use_adapters=False,
+                 head_weights=None):
         super().__init__()
         import slideflow as sf
 
@@ -41,17 +42,24 @@ class LoRA(nn.Module):
         if not hasattr(self.encoder, 'blocks'):
             raise ValueError('LoRA requires a compatible timm vision transformer')
         self.first_block = max(0, len(self.encoder.blocks) - 8) if first_block is None else first_block
-        if adapt:
+        if hasattr(self.encoder, 'first_adapted'):
+            if adapt or adapters is not None:
+                raise ValueError('use an unadapted extractor to initialize or load trainable adapters')
+            self.first_block = self.encoder.first_adapted
+        elif adapters is not None:
+            apply_lora(self.encoder, adapters, first_block=self.first_block, rank=rank,
+                       alpha=alpha, dropout=dropout)
+        elif adapt or use_adapters:
             init_lora(self.encoder, first_block=self.first_block, rank=rank,
                       alpha=alpha, dropout=dropout)
-        else:
-            if hasattr(self.encoder, 'first_adapted'):
-                raise ValueError('frozen control requires an encoder without adapters')
+        if not adapt:
             self.encoder.requires_grad_(False)
         self.adapt = adapt
         self.tile_batch_size = tile_batch_size
         self.checkpoint_blocks = checkpoint_blocks
         self.head = head_class(self.num_features, n_out, **(head_kwargs or {}))
+        if head_weights is not None:
+            self.head.load_state_dict(torch.load(head_weights, map_location='cpu', weights_only=True))
         self.uq_uses_softmax = 'uq_softmax' in inspect.signature(self.head.forward).parameters
         self.train()
 
@@ -77,9 +85,10 @@ class LoRA(nn.Module):
             raise ValueError('bag lengths must be integers between one and the padded size')
         valid = torch.arange(k, device=bags.device)[None, :] < lens[:, None]
         images = bags[valid].permute(0, 3, 1, 2)
-        chunks = [encode_tiles(self.encoder, self.transform(chunk.float()),
-                               checkpoint_blocks=self.training and self.checkpoint_blocks)
-                  for chunk in images.split(self.tile_batch_size)]
+        with torch.set_grad_enabled(torch.is_grad_enabled() and self.adapt):
+            chunks = [encode_tiles(self.encoder, self.transform(chunk.float()),
+                                   checkpoint_blocks=self.training and self.adapt and self.checkpoint_blocks)
+                      for chunk in images.split(self.tile_batch_size)]
         encoded = torch.cat(chunks).float()
         features = encoded.new_zeros(n, k, self.num_features)
         features[valid] = encoded
@@ -131,6 +140,6 @@ class LoRA(nn.Module):
 
     def export_adapters(self, path):
         """Save adapter tensors for use with the matching base feature extractor."""
-        if not self.adapt:
+        if not hasattr(self.encoder, 'first_adapted'):
             raise ValueError('frozen encoder has no adapters to export')
         torch.save(adapter_state_dict(self.encoder), path)

@@ -2,12 +2,14 @@
 
 import numpy as np
 import torch
-from slideflow.mil._params import MILModelConfig
+from slideflow.mil._params import MILModelConfig, TrainerConfig
 from slideflow.mil.data import MapDataset, EncodedDataset
-from ._extension_data import InstanceBagDataset, StratifiedShuffle
+from ._extension_data import InstanceBagDataset, StratifiedShuffle, TileBagDataset, resolve_tile_bags
 
 
 class ExtensionModelConfig(MILModelConfig):
+    bag_dataset = InstanceBagDataset
+
     def __init__(self, model, *, num_workers=None, **kwargs):
         self.num_workers = num_workers
         super().__init__(model, **kwargs)
@@ -47,7 +49,7 @@ class ExtensionModelConfig(MILModelConfig):
             target = target if encoder is None else target.squeeze()
             return (features, lengths, target) if use_lens else (features, target)
 
-        dataset = MapDataset(combine, InstanceBagDataset(bags, **data_options),
+        dataset = MapDataset(combine, self.bag_dataset(bags, **data_options),
                              EncodedDataset(encoder, targets))
         dataset.encoder = encoder
         return DataLoader(dataset, **loader_options)
@@ -76,6 +78,35 @@ class ExtensionModelConfig(MILModelConfig):
         if level == 'patient':
             df = df.rename(columns={c: 'patient' for c in df if c.endswith('-patient')})
         return super().run_metrics(df, level=level, outdir=outdir)
+
+
+class LoRAModelConfig(ExtensionModelConfig):
+    bag_dataset = TileBagDataset
+
+    def to_dict(self):
+        params = super().to_dict()
+        options = dict(params['model_kwargs'] or {})
+        if options.pop('adapters', None) is not None:
+            options['use_adapters'] = True
+        options.pop('head_weights', None)
+        params['model_kwargs'] = options
+        return params
+
+    def predict(self, model, bags, attention=False, **kwargs):
+        dataset = TileBagDataset(bags, dtype=torch.uint8)
+        loaded = (dataset[i][0] for i in range(len(dataset)))
+        return super().predict(model, loaded, attention=attention, **kwargs)
+
+
+class LoRAConfig(TrainerConfig):
+    """Resolve tile paths, then use the standard MIL trainer and aggregation."""
+
+    def train(self, train_dataset, val_dataset, outcomes, bags, **kwargs):
+        return super().train(train_dataset, val_dataset, outcomes,
+                             resolve_tile_bags(bags), **kwargs)
+
+    def eval(self, model, dataset, outcomes, bags, **kwargs):
+        return super().eval(model, dataset, outcomes, resolve_tile_bags(bags), **kwargs)
 
 
 class NNMILModelConfig(ExtensionModelConfig):
